@@ -1,0 +1,22 @@
+# ===== Core JAX stack (current implementation: src_jax/ + crafter_dreamer/) =====
+# CPU by default; use jax[cuda12]==0.10.1 for GPU training
+jax==0.10.1
+flax==0.12.7
+optax==0.2.8
+distrax==0.1.8
+chex==0.1.91
+orbax-checkpoint==0.12.0
+
+# ===== Environment + utils =====
+numpy>=2.0
+matplotlib==3.9.2
+Pillow==10.4.0
+crafter==1.8.3
+opensimplex==0.4.5
+ruamel.yaml==0.18.6
+
+# ===== Cloud training (optional) =====
+modal
+
+# ===== Legacy PyTorch implementation (src/ + tetris/, stages 1-2) =====
+# torch>=2.2  # uncomment to run the original PyTorch version (MPS on Apple Silicon)
