@@ -1,8 +1,8 @@
-# Kekulé — a mini-DreamerV3 World Model for Crafter
+# Oneiro — a mini-DreamerV3 World Model for Crafter
 
 A from-scratch reimplementation of [DreamerV3](https://arxiv.org/abs/2301.04104) (Hafner et al., 2023) in **JAX / Flax NNX**, trained on the [Crafter](https://github.com/danijar/crafter) benchmark (2D survival Minecraft, 22 hierarchical achievements, sparse rewards, 64×64 pixels).
 
-> Named after **August Kekulé**, who famously discovered the ring structure of benzene in a dream. Fitting for an agent that learns its entire policy inside its own dreams — the imagination rollouts of its world model.
+> From **oneirology** — the scientific study of dreams (Greek *oneiros*). Fitting for an agent that learns its entire policy inside its own dreams: the imagination rollouts of its world model.
 
 **15.26M parameters** (≈ DreamerV3-S class) — current best: **4.0 achievements/episode after only 64k env steps** (Rainbow baseline: 4.3 at 1M steps).
 
