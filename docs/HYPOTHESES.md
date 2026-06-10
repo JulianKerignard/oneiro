@@ -330,9 +330,18 @@ Chaque hypothèse :
 
 **Origine** : v21 — la dérive nette commence iter ~19k, le buffer est plein à ~15.6k. Best 4.40 @ 13k → fin 2.20 @ 30k. place_table vu à 7k puis plus jamais.
 
-**Statut** : ouvert — candidat n°1 pour v22
+**Statut** : ouvert — candidat n°1 pour v22, AFFINÉ par la review des métriques internes v21
 
-**Fix candidat** : BUFFER_CAPACITY 500k → 1M (= paper). +6GB VRAM (12.3GB total), large sur RTXP 96GB. Couvre un run 30k entier sans wrap. Alternatives/compléments : réserve permanente de données early, ou ratio↑.
+**Signature multi-métrique (review logs v21, échantillonnage /2000 iter)** :
+- `p95` des returns fond en continu après 10-12k : 2.36 → 1.54 (les bonnes trajectoires imaginées disparaissent)
+- `ret/val` : 0.57 @ 10k → 0.07 @ 14k → **négatifs** @ 26k/30k (l'imagination ne prédit plus que les pénalités — le pattern H_311 revient mais sans récupération)
+- `kl` haute persistante (9-11.6) : le prior court après une dynamique qui change sans cesse
+- `rec` anormalement bas en fin (9.25, record projet) : buffer devenu homogène = facile à reconstruire = **l'indice direct de la perte de diversité**
+- `H` sain tout le run (0.5-0.86) : ce n'est PAS un collapse d'entropie
+
+**Diagnostic affiné — H_311 déclenche, H_312 verrouille** : le cycle de saturation (H_311) existe depuis toujours, mais les récupérations des vagues 1-2 (6-13k) étaient possibles parce que le buffer contenait encore la diversité early (warmup random + exploration). Le buffer est plein à 15.6k → cette réserve s'écrase → chaque creux devient plus dur à remonter → dernière bonne vague @ 19k (4.10), puis plafonds descendants (3.4 → 2.8 → 2.2). La dérive des métriques internes commence dès 12-14k (avant le plein strict), mais la PERTE DE RÉCUPÉRATION date de ~19k.
+
+**Fix candidat** : BUFFER_CAPACITY 500k → 1M (= paper). +6GB VRAM (12.3GB total), large sur RTXP 96GB. Couvre un run 30k entier sans wrap. Compléments : réserve permanente de données early (reservoir, jamais écrasée), et noter que le scale EMA (0.99) redescend lentement → écrase les advantages dans les creux.
 
 ---
 
