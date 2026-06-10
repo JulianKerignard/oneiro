@@ -73,17 +73,43 @@ def build_command(args) -> str:
     if args.extra_args:
         train_flags.append(args.extra_args)
 
-    return " && ".join([
+    setup = " && ".join([
         "set -e",
         "apt-get update -qq",
         "apt-get install -y -qq git > /dev/null",
         f"git clone --depth 1 {REPO_URL} /work",
         "cd /work",
         "pip install -q -r requirements.txt",
-        'pip install -q -U "jax[cuda12]==0.10.1"',
-        # -u : stdout unbuffered pour le streaming des logs
-        "python -u crafter_dreamer/scripts/train_dreamer_jax.py " + " ".join(train_flags),
+        'pip install -q -U "jax[cuda12]==0.10.1" lightning-sdk',
     ])
+
+    sync_up = f"python crafter_dreamer/scripts/lightning_sync.py up --run-name {args.run_name} --workdir /work"
+
+    # Resume optionnel : télécharge les checkpoints du run précédent et passe
+    # le plus récent au script (${{LATEST:+...}} : flag omis si rien trouvé).
+    resume_part = ""
+    if getattr(args, "resume_from_job", None):
+        resume_part = (
+            f" && python crafter_dreamer/scripts/lightning_sync.py down "
+            f"--run-name {args.resume_from_job} --workdir /work"
+            ' && LATEST=$(ls -1 /work/resume/*iter*.npz 2>/dev/null | sort | tail -1)'
+        )
+        train_flags.append('${LATEST:+--resume_from "$LATEST"}')
+
+    # Sync périodique en arrière-plan (survie aux préemptions spot) +
+    # sync final qui s'exécute même si le training échoue (exit code conservé).
+    # NB : le " ; " avant le subshell est crucial — avec " && (...) &" le
+    # `&` détacherait TOUTE la chaîne setup incluse (précédence sh).
+    run_part = (
+        f" ; ( while true; do sleep 300; {sync_up} >/dev/null 2>&1; done ) & SYNC_PID=$!"
+        " ; set +e"
+        " ; python -u crafter_dreamer/scripts/train_dreamer_jax.py " + " ".join(train_flags) +
+        " ; RC=$?"
+        " ; kill $SYNC_PID 2>/dev/null"
+        f" ; {sync_up}"
+        " ; exit $RC"
+    )
+    return setup + resume_part + run_part
 
 
 def cmd_launch(args):
@@ -99,11 +125,21 @@ def cmd_launch(args):
     print(f"Command    : {command[:120]}...")
     print()
 
+    # Auth Lightning injectée dans le job : nécessaire pour lightning_sync.py
+    # (upload des checkpoints vers le storage du teamspace pendant/après le run).
+    sync_env = {
+        v: os.environ[v]
+        for v in ("LIGHTNING_API_KEY", "LIGHTNING_USER_ID",
+                  "LIGHTNING_USERNAME", "LIGHTNING_TEAMSPACE")
+        if os.environ.get(v)
+    }
+
     job = Job.run(
         name=args.run_name,
         machine=machine,
         image=IMAGE,
         command=command,
+        env=sync_env,
         interruptible=args.interruptible,
         max_runtime=int(args.max_hours * 3600),
     )
@@ -142,6 +178,15 @@ def cmd_stop(args):
     print(f"{job.name} : stop demandé.")
 
 
+def cmd_pull(args):
+    check_auth()
+    from lightning_sdk import Teamspace
+    ts = Teamspace()
+    target = os.path.join(args.target, args.run_name)
+    ts.download_folder(f"oneiro/{args.run_name}", target_path=target)
+    print(f"Artefacts téléchargés dans {target}/")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="action", required=True)
@@ -166,12 +211,21 @@ def main():
                     help="Désactive mp_collect même sur les grosses machines.")
     pl.add_argument("--extra-args", type=str, default="",
                     help="Flags bruts supplémentaires passés à train_dreamer_jax.py.")
+    pl.add_argument("--resume-from-job", type=str, default=None,
+                    help="Nom d'un job précédent : reprend depuis son dernier "
+                         "checkpoint syncé (oneiro/<job>/checkpoints sur le teamspace).")
     pl.set_defaults(func=cmd_launch)
 
     for name, fn in (("logs", cmd_logs), ("status", cmd_status), ("stop", cmd_stop)):
         ps = sub.add_parser(name)
         ps.add_argument("--run-name", required=True)
         ps.set_defaults(func=fn)
+
+    pp = sub.add_parser("pull", help="Télécharger les artefacts d'un run en local")
+    pp.add_argument("--run-name", required=True)
+    pp.add_argument("--target", default="lightning_outputs",
+                    help="Dossier local de destination (défaut: lightning_outputs/<run>).")
+    pp.set_defaults(func=cmd_pull)
 
     args = p.parse_args()
     args.func(args)

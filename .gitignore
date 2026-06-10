@@ -22,6 +22,7 @@ tetris/
 runs/
 checkpoints/
 modal_outputs/
+lightning_outputs/
 logs/
 *.pt
 *.npz

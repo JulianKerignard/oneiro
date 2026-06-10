@@ -1256,6 +1256,10 @@ def parse_args():
     p.add_argument("--warmup_steps", type=int, default=WARMUP_STEPS)
     p.add_argument("--profile", action="store_true",
                    help="Active le profiling fin (breakdown collect/WM/AC/transfer).")
+    p.add_argument("--resume_from", type=str, default=None,
+                   help="Checkpoint .npz à charger pour reprendre le training "
+                        "(reprend à l'iter du .meta.json). Le buffer repart du "
+                        "warmup (caveat : premières centaines d'iter sur données fraîches).")
     p.add_argument("--mp_collect", action="store_true",
                    help="Active la collecte multiprocessing (1 worker = 1 env).")
     # OFF par défaut (audit) : aucune implémentation de référence n'utilise
@@ -1508,6 +1512,22 @@ def main():
     # normal car les returns sont petits au début) → EMA converge sur premiers batches.
     return_ema_std = jnp.array([-0.05, 0.05], dtype=jnp.float32)
 
+    # ----------- Resume : charger un checkpoint AVANT le split functional
+    # (les Variables nnx sont partagées : muter les modules ici suffit,
+    # le nnx.split de make_functional_train_steps capturera les poids chargés).
+    start_iter = 0
+    if args.resume_from:
+        start_iter = load_checkpoint_into_modules(args.resume_from, {
+            "encoder": encoder, "rssm": rssm, "decoder": decoder,
+            "reward_head": reward_head, "continue_head": continue_head,
+            "actor": actor, "critic": critic, "slow_critic": slow_critic,
+        })
+        if start_iter >= args.train_iter:
+            print(f"[resume] iter {start_iter} >= train_iter {args.train_iter} : rien à faire.")
+            return
+        # Caveat connu : optimizer Adam (m/v), buffer et EMAs repartent à zéro
+        # — resume "soft", suffisant pour survivre à une préemption spot.
+
     # ----------- FIX 1 : Functional training loop
     # Split modules + optimizers en (graphdef, state). Le graphdef est capturé
     # en closure dans les fonctions jit, ce qui supprime l'overhead Python du
@@ -1639,7 +1659,9 @@ def main():
     batch_wm_next = buffer.sample_sequences(k_wm0, args.batch_size, SEQ_LEN)
     batch_ac_next = buffer.sample_sequences(k_ac0, args.batch_size, SEQ_LEN)
 
-    for it in range(args.train_iter):
+    if start_iter > 0:
+        print(f"[resume] Boucle reprise à iter {start_iter} (jusqu'à {args.train_iter})")
+    for it in range(start_iter, args.train_iter):
 
         # ============ Phase 13 : rnd_coef effectif pour CET iter
         # SAFEGUARD 1 (warmup) : rampe 0 → args.rnd_coef sur rnd_warmup_steps.
@@ -1881,7 +1903,7 @@ def main():
         # ============ Logs
         if (it + 1) % LOG_INTERVAL == 0:
             elapsed = time.time() - t_start
-            ips = (it + 1) / elapsed
+            ips = (it + 1 - start_iter) / elapsed
             vals = {k: float(v) for k, v in last_metrics.items()}
             history["iter"].append(it)
             history["loss_wm"].append(vals.get("loss_wm", 0.0))
@@ -2118,6 +2140,72 @@ def save_checkpoint(path, encoder, rssm, decoder, reward_head, continue_head,
     meta_path = path.with_suffix(".meta.json")
     with open(meta_path, "w") as f:
         json.dump({"iter": int(it), "args": vars(args)}, f, indent=2)
+
+
+def _set_at_path(state, path_parts, value):
+    """Affecte récursivement une valeur dans un state nnx (cf. visualize_jax)."""
+    def _resolve_key(container, key):
+        try:
+            key_int = int(key)
+            if isinstance(container, (list, tuple)):
+                return key_int
+            try:
+                container[key_int]
+                return key_int
+            except (KeyError, TypeError):
+                return key
+        except ValueError:
+            return key
+
+    node = state
+    for p in path_parts[:-1]:
+        node = node[_resolve_key(node, p)]
+    leaf_key = _resolve_key(node, path_parts[-1])
+    leaf = node[leaf_key]
+    if hasattr(leaf, "value"):
+        leaf.value = jnp.asarray(value)
+    else:
+        node[leaf_key] = jnp.asarray(value)
+
+
+def load_checkpoint_into_modules(path, named_modules):
+    """
+    Charge un checkpoint .npz (format save_checkpoint) dans les modules.
+
+    Les Variables nnx du state étant partagées avec le module, la mutation
+    leaf.value se propage directement — pas de nnx.update nécessaire.
+
+    Args:
+        path : chemin du .npz
+        named_modules : dict {prefix: module} (mêmes prefixes que save_checkpoint)
+
+    Returns:
+        start_iter (int) : l'itération du checkpoint (0 si meta absent).
+    """
+    path = Path(path)
+    ckpt = np.load(path, allow_pickle=False)
+    print(f"[resume] {len(ckpt.files)} clés chargées depuis {path.name}")
+
+    for prefix, module in named_modules.items():
+        state = nnx.state(module, nnx.Param)
+        expected = flatten_state(state)
+        missing = 0
+        for key in expected:
+            full_key = f"{prefix}.{key}"
+            if full_key in ckpt.files:
+                _set_at_path(state, key.split("."), ckpt[full_key])
+            else:
+                missing += 1
+        tag = f" ({missing} clés manquantes !)" if missing else ""
+        print(f"[resume]   {prefix} OK{tag}")
+
+    start_iter = 0
+    meta_path = path.with_suffix(".meta.json")
+    if meta_path.exists():
+        with open(meta_path) as f:
+            start_iter = int(json.load(f).get("iter", 0))
+    print(f"[resume] reprise à iter {start_iter}")
+    return start_iter
 
 
 def _variable_to_numpy(v):
