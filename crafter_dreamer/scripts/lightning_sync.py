@@ -19,18 +19,30 @@ def get_teamspace():
 
 
 def cmd_up(args):
+    import time
     ts = get_teamspace()
-    pushed = []
-    for sub in ("checkpoints", "runs"):
+    pushed, failed = [], []
+    # runs/ d'abord : petit (summary JSON) et prioritaire pour le monitoring —
+    # un échec sur les gros checkpoints ne doit pas le bloquer.
+    for sub in ("runs", "checkpoints"):
         local = Path(args.workdir) / sub
-        if local.is_dir() and any(local.iterdir()):
-            ts.upload_folder(
-                str(local),
-                remote_path=f"oneiro/{args.run_name}/{sub}",
-                progress_bar=False,
-            )
-            pushed.append(sub)
-    print(f"[sync] up OK ({', '.join(pushed) or 'rien'}) -> oneiro/{args.run_name}/")
+        if not (local.is_dir() and any(local.iterdir())):
+            continue
+        for attempt in range(3):
+            try:
+                ts.upload_folder(
+                    str(local),
+                    remote_path=f"oneiro/{args.run_name}/{sub}",
+                    progress_bar=False,
+                )
+                pushed.append(sub)
+                break
+            except Exception as e:
+                print(f"[sync] {sub} tentative {attempt+1}/3 échouée : {type(e).__name__}: {e}")
+                time.sleep(5)
+        else:
+            failed.append(sub)
+    print(f"[sync] up : OK={pushed or '-'} FAILED={failed or '-'} -> oneiro/{args.run_name}/")
 
 
 def cmd_down(args):

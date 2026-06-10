@@ -100,8 +100,11 @@ def build_command(args) -> str:
     # sync final qui s'exécute même si le training échoue (exit code conservé).
     # NB : le " ; " avant le subshell est crucial — avec " && (...) &" le
     # `&` détacherait TOUTE la chaîne setup incluse (précédence sh).
+    # set +e DANS le subshell : sans ça, le set -e hérité tue la boucle à la
+    # première erreur transitoire d'upload (bug découvert sur v21 : un seul
+    # meta.json poussé puis plus rien).
     run_part = (
-        f" ; ( while true; do sleep 300; {sync_up} >/dev/null 2>&1; done ) & SYNC_PID=$!"
+        f" ; ( set +e; while true; do sleep 300; {sync_up} >>/tmp/sync.log 2>&1; done ) & SYNC_PID=$!"
         " ; set +e"
         " ; python -u crafter_dreamer/scripts/train_dreamer_jax.py " + " ".join(train_flags) +
         " ; RC=$?"
