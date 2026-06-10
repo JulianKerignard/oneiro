@@ -324,6 +324,18 @@ Chaque hypothèse :
 
 ---
 
+### H_312 — Buffer FIFO plein → perte de diversité → dérive descendante tardive
+
+**Énoncé** : Le buffer 500k devient plein à iter ~15.6k ; le FIFO écrase alors les données anciennes (warmup random, exploration early) → la distribution d'entraînement du WM se rétrécit à la policy récente → reward head sans contre-exemples, imagination myope → érosion mutuelle policy/WM → les plafonds de vagues BAISSENT au lieu de monter.
+
+**Origine** : v21 — la dérive nette commence iter ~19k, le buffer est plein à ~15.6k. Best 4.40 @ 13k → fin 2.20 @ 30k. place_table vu à 7k puis plus jamais.
+
+**Statut** : ouvert — candidat n°1 pour v22
+
+**Fix candidat** : BUFFER_CAPACITY 500k → 1M (= paper). +6GB VRAM (12.3GB total), large sur RTXP 96GB. Couvre un run 30k entier sans wrap. Alternatives/compléments : réserve permanente de données early, ou ratio↑.
+
+---
+
 ### H_311 — Cycle de saturation des rewards one-shot = la vraie dynamique de l'oscillation
 
 **Énoncé** : Les achievements Crafter ne paient qu'une fois par épisode. Une fois un comportement maîtrisé, le buffer se remplit d'états post-achievement à reward ~0 → le reward head converge vers ~0 sur la distribution courante → returns imaginés morts (`ret` ≈ 0 observé) → advantages nuls → seul le terme entropique agit → H remonte → la policy se dilue → la perf retombe → le reward redevient « surprenant » → ré-apprentissage. Oscillation entretenue.

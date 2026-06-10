@@ -623,6 +623,48 @@ v20 et v20b ont **la même config ET le même seed (42)** : v20 = 0.00 @ 1500, v
 
 ---
 
+## v21 — LE RUN BENCHMARK 1M : best 4.40 @ 13k, puis DÉRIVE TARDIVE (nouveau problème)
+
+**Statut : TERMINÉ** (158.7 min, ~$4.7, 30 000 iter ≈ 965k env_steps ≈ benchmark 1M). Config : γ=0.997 + fast critic + entropy 3e-4 + buffer per-env + free bits + ratio 128.
+
+### Trajectoire (EVAL toutes les 1000)
+
+```
+7000 : 4.20 ★ (7/22, place_table 20%)        ← pic vague 1, table présente
+8000-12000 : vagues 2.6-3.5
+13000 : 4.40 ★★ BEST (6/22, drink 70%, wood 60%)
+14000-19000 : vagues 2.6-4.1 (19000 : 4.10, sample 4.20)
+20000-30000 : DÉRIVE DESCENDANTE — plafonds de vagues 3.4 → 3.3 → 2.8 → 2.6
+30000 (fin) : 2.20 (3/22 : sapling, wake_up, place_plant 20%)
+```
+
+### Confrontation à la prédiction (notée avant le run)
+
+- Prédit : médiane 4.5-5.5 final, bas 3.5-4.0. **Réel : best 4.40** (fourchette basse ✓) **mais FIN 2.20** — la dérive descendante tardive n'était dans AUCUN scénario. Découverte, pas confirmation.
+- Rainbow (4.3) : battu **en pic** (4.40 @ 420k steps) — PAS battu sur la métrique officielle (perf finale à 1M : 2.20).
+- place_table : vu à 7000 (20%) puis plus jamais — la couche 2 a régressé au lieu de consolider.
+
+### H_312 (nouveau) — la dérive coïncide avec le buffer PLEIN
+
+Le buffer 500k se remplit à iter ~15 600 (32 steps/iter). La dérive nette commence ~19k. Mécanisme proposé : le FIFO écrase les données anciennes/diverses → tout le buffer = la policy récente → le WM perd la couverture, le reward head perd les contre-exemples → imagination myope → érosion mutuelle policy/WM. (+ wrap-around per-env : séquences chevauchant le ptr d'écriture = discontinuités sans done, ~0.2%/env — secondaire.)
+
+**Fix candidat trivial** : BUFFER_CAPACITY 1M (= paper). Coût VRAM +6GB (12.3GB total uint8) — large sur RTXP 96GB (on était calibré L4 24GB). Couvre l'intégralité d'un run 30k sans wrap.
+
+### Incident pipeline : checkpoints v21 PERDUS (upload 502)
+
+Le sync (boucle ET final) a échoué sur les .npz : **HTTP 502 systématique sur les gros fichiers depuis les jobs** (meta.json 747B passe, npz 57MB rejeté — uploader single-part du SDK vs gateway). Le test local 57MB passait (44s). Les poids du run benchmark sont morts avec le conteneur ; les logs/EVAL (le résultat scientifique) sont saufs. Fix à investiguer pour v22 : `path_mappings` (mécanisme natif des jobs pour les artefacts) ou push HF Hub depuis le job.
+
+### Bilan global du projet à ce point
+
+| Époque | Niveau |
+|---|---|
+| Avant audit (v1-v14) | 0.8-2.7, actor cassé |
+| Post-audit (v18-v20b) | 3.3-4.0 en 4-8k iter |
+| **v21 best** | **4.40 @ 420k steps** (~Rainbow en pic) |
+| v21 @ 1M (métrique officielle) | 2.20 — la dérive tardive est LE problème ouvert |
+
+---
+
 ## v14 — Anti-spam OFF + entropy revert + adaptive ON (échec)
 
 **Statut : code validé, smoketest OK, en attente run Modal.**
