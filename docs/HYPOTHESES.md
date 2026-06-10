@@ -342,7 +342,7 @@ Chaque hypothèse :
 
 **Runs de test** : v20 (4000 iter), v20b (8000 iter, en cours)
 
-**Statut** : 🔄 en cours — trade-off confirmé, asymptote en cours de mesure
+**Statut** : ✓ VALIDÉE (sur la profondeur) — γ=0.997 RETENU pour le 30k. v20b 8000 iter : place_table 10% (1er achievement couche 2 du projet), wood 70% (record), sample 4.40 (record), plancher d'oscillation 2.5 (vs 2.0 à γ=0.99), returns imaginés vivants pendant les creux. Best argmax 3.90 ≈ inchangé (non-discriminant, variance) : le gain est dans la COMPOSITION, pas le pic.
 
 **Résultats v20** :
 - COÛT confirmé : burn-in 4× plus lent (0.00 ach jusqu'à iter 2000). Mécanisme : avec horizon 330, les returns imaginés early sont NÉGATIFS (-0.4) — ils capturent la mort inévitable de la policy débutante → le PG optimise la survie passive d'abord (« l'agent voit sa mort »).

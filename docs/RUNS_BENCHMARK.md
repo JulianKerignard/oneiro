@@ -585,14 +585,34 @@ Un seul changement vs v19b : `GAMMA 0.99 → 0.997` (horizon de valeur ~100 → 
 
 ---
 
-## v20b — γ=0.997 × 8000 iter (verdict gamma) + LA leçon variance
+## v20b — γ=0.997 × 8000 iter : PERCÉE COUCHE 2 (place_table) — verdict gamma : RETENU
 
-**Statut : en cours.** Config identique à v20, 8000 iter pour voir l'asymptote.
+**Statut : TERMINÉ** (47.7 min, ~$2, 261k env_steps = 26% du benchmark). Config identique à v20.
 
-| Iter | argmax | sample | unlocked |
+| Iter | argmax | sample | Fait marquant |
 |---|---|---|---|
-| 1500 | 2.80 | 2.40 | **6/22** (sapling, wake_up, drink, wood, cow, zombie) — répertoire le plus LARGE du projet à 1500 |
-| ... | (compléter à la fin du run) | | |
+| 500-1000 | 0.0-0.3 | 0.2-0.8 | burn-in γ=0.997 (attendu) |
+| 1500 | 2.80 | 2.40 | 6/22 — répertoire le plus large du projet à 1500 |
+| **2000** | **3.90** ★ | 3.40 | best argmax (zombie 50%) |
+| 2500-4000 | 3.8 → 2.7 | 2.8-3.8 | vague descendante, plancher ~2.7 |
+| 4500-5500 | 2.5-3.0 | 2.2-3.0 | creux 2 (plancher 2.5 vs 2.0-2.3 à γ=0.99) |
+| 6000-6500 | 3.80 | **4.40** | 2e vague — **wood 70% (record)** |
+| **7500** | 3.50 | **4.40** | ⭐ **place_table=10% — PREMIER achievement couche 2 en 20 runs** |
+| 8000 (fin) | 3.70 | **4.40** | place_table 10%, wood 60%, stable-haut |
+
+### Verdict H_310 (γ=0.997) : RETENU pour le run 30k
+
+**Pour** (tous les indicateurs de PROFONDEUR — ce qui compte pour atteindre 5-7) :
+- **place_table débloqué** : la chaîne wood→table commence — c'est exactement la promesse du long horizon (valeur des chaînes profondes visible)
+- sample 4.40 (record projet, atteint 3× : 6000, 7500, 8000) ; wood 70% (record, vs 40% max à γ=0.99)
+- returns imaginés VIVANTS pendant les creux (0.5-0.96 vs ~0 à γ=0.99) → plancher d'oscillation monté (~2.5 vs 2.0)
+- épisodes plus longs (190-208 steps : meilleure survie)
+
+**Contre (honnête)** : best argmax 3.90 ≤ 4.00 (v18) — non-discriminant vu la variance ±1-2, mais le plafond argmax n'a PAS été franchi sur 8k. L'argmax mesure mal une policy qui s'élargit ; le sample et la composition sont les vrais signaux de progrès ici.
+
+**Structurel** : sur 30k iter, le coût du burn-in (2000 iter) s'amortit ; le paper utilise 0.997 précisément pour le régime 1M steps.
+
+### Pattern confirmé : oscillation en vagues, chaque vague plus PROFONDE (pas plus haute en argmax — plus riche en composition). La vague 2 (6000-8000) a la même hauteur argmax que la vague 1 mais : +place_table, wood ×1.75, sample +1.0.
 
 ### ⚠️ Leçon variance inter-run (importante pour TOUTES les comparaisons)
 
