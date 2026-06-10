@@ -316,11 +316,21 @@ Chaque hypothèse :
 
 **Origine** : Audit 46-agents (confirmé medium), promu suspect principal par le pattern v18 post-pic : 4.00 @ 2000 puis 2.30 → 2.00, perte des achievements profonds, `sample > argmax` systématique, val/ret qui oscillent.
 
-**Run de test** : v19 (fix appliqué, smoketest OK, en attente de crédits Modal)
+**Run de test** : v19b (Lightning RTXP 6000, $1.05)
 
-**Statut** : fix appliqué — à valider en v19
+**Statut** : partielle — fix CONSERVÉ mais pas la cause racine
 
-**Gate** : best ≥ 4.5 ET pas de déclin durable post-pic (EVAL 2500-4000 ≥ 3.5).
+**Résultat** : v19b = 1.20 → 3.20 → 3.30 (pic) → creux 2.30 @ 3000 → **3.40 @ 3500-4000 (best en fin de run, sample 3.80)**. Gates stricts ✗ (best < 4.5, creux < 3.5). Le fast critic accélère le early (3.20 @ 1000 vs 2.30 v18) et le profil finit stable-montant au lieu de déclinant, mais l'OSCILLATION demeure. Cause réelle identifiée dans les logs : returns imaginés 0.68 → ~0 post-pic (saturation des achievements one-shot → reward head prédit ~0 → advantages morts → l'entropie dilue → cycle). → H_310 (gamma) devient le test suivant.
+
+---
+
+### H_311 — Cycle de saturation des rewards one-shot = la vraie dynamique de l'oscillation
+
+**Énoncé** : Les achievements Crafter ne paient qu'une fois par épisode. Une fois un comportement maîtrisé, le buffer se remplit d'états post-achievement à reward ~0 → le reward head converge vers ~0 sur la distribution courante → returns imaginés morts (`ret` ≈ 0 observé) → advantages nuls → seul le terme entropique agit → H remonte → la policy se dilue → la perf retombe → le reward redevient « surprenant » → ré-apprentissage. Oscillation entretenue.
+
+**Origine** : analyse des logs v19b (ret 0.68 → -0.08 post-pic, H 0.45 → 0.9, pg → ±0.003)
+
+**Statut** : ouvert — mécanisme cohérent avec v18 ET v19b. Mitigations candidates : γ=0.997 (H_310, étend l'horizon → la valeur des chaînes profondes reste visible quand les quick-wins saturent), train_ratio ↑, buffer plus divers.
 
 ---
 
@@ -330,7 +340,16 @@ Chaque hypothèse :
 
 **Origine** : Audit externe (refs comparison)
 
-**Statut** : ouvert — à isoler après H_308/H_309
+**Runs de test** : v20 (4000 iter), v20b (8000 iter, en cours)
+
+**Statut** : 🔄 en cours — trade-off confirmé, asymptote en cours de mesure
+
+**Résultats v20** :
+- COÛT confirmé : burn-in 4× plus lent (0.00 ach jusqu'à iter 2000). Mécanisme : avec horizon 330, les returns imaginés early sont NÉGATIFS (-0.4) — ils capturent la mort inévitable de la policy débutante → le PG optimise la survie passive d'abord (« l'agent voit sa mort »).
+- BÉNÉFICE en signature : post-décollage, les unlocked s'empilent SANS pertes (vs cycle H_311 à γ=0.99), scale monte à 2.81 (vs plafond 1.9), pente +0.8/1000 iter encore à 4000, wood 40% (record à 4k).
+- v20b @ 1500 : 2.80, 6/22 unlocked (répertoire le plus large du projet à cette itération).
+
+**⚠️ Caveat variance** : v20 vs v20b = même config + même seed → 0.00 vs 2.80 @ 1500 (non-déterminisme GPU, système chaotique). Variance inter-run ±1-2 ach → les comparaisons single-run fines sont du bruit ; juger sur tendances longues.
 
 ---
 

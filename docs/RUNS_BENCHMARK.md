@@ -508,6 +508,101 @@ Hypothèse : mêmes pics, moins de creux. Gates : best ≥ 4.5, et surtout PAS d
 
 ---
 
+## v19/v19b — Fast critic bootstrap (H_309) : oscillation amortie, pas éliminée
+
+**Statut : MITIGÉ. Fix conservé (alignement officiel), mais ce n'était pas la cause racine de l'instabilité.**
+
+Premier run piloté par le SDK Lightning (RTXP 6000 spot, `lightning_train_jax.py`). v19 initial tué à iter 300 par le health monitor (`H_collapse` ×5 consécutifs — seuils calibrés à l'ère adaptive_alpha, faux positif en régime entropy-fixe où le burn-in plonge normalement à H≈0.08). v19b relancé avec `--no_health_auto_stop` : $1.05, 24 min de training, **2.8 ips** (vs 1.1 sur L4 — RTXP + mp_collect = ×2.5).
+
+### Trajectoire v19b (= v18 + fast critic, un seul changement)
+
+| Iter | argmax | sample | Notes |
+|---|---|---|---|
+| 500 | 1.20 | 1.80 | burn-in H=0.08 puis déverrouillage |
+| 1000 | 3.20 | 3.60 | EN AVANCE sur v18 (2.30) — cycle plus rapide |
+| 1500 | 3.30 | 3.20 | pic local |
+| 2000-3000 | 3.00 → 2.30 | 2.60 → 2.20 | creux (même pattern que v18) |
+| 3500 | **3.40** | 3.60 | remontée — nouveau best |
+| 4000 | **3.40** | **3.80** | **finit À son best, sample montant** |
+
+### Lecture
+
+- **vs v18** : pic absolu inférieur (3.40 vs 4.00) mais PROFIL meilleur — v18 déclinait à la coupure (2.00 @ 3000), v19b fait un cycle creux→récupération et finit stable-montant. (Caveat : EVAL à 10 épisodes, variance réelle ; v18 aurait peut-être aussi rebondi.)
+- **Gates stricts ✗** (best < 4.5, creux < 3.5) → H_309 n'était PAS la cause racine de l'oscillation. Le fix reste (structure officielle + accélère le early : 3.20 @ 1000).
+- **La vraie dynamique de l'oscillation** (visible colonne `ret`) : returns imaginés 0.68 → ~0.0 après le pic. Les achievements maîtrisés (one-shot par épisode) saturent → le buffer se remplit d'états post-achievement à reward ~0 → reward head prédit ~0 → advantages morts → seule l'entropie agit → H remonte (0.45→0.9) → dilution → puis ré-apprentissage. Cycle, pas effondrement.
+
+### Suspect suivant : H_310 — GAMMA 0.99 → 0.997 (paper)
+
+γ=0.99 = horizon de valeur ~100 steps. Les achievements suivants (wood→table→pickaxe) sont plus profonds dans l'épisode → hors de portée des returns une fois les quick-wins saturés → c'est exactement le « ret≈0 » observé. γ=0.997 (paper) = horizon ~330. Un seul changement de constante.
+
+### v20 (à lancer)
+
+```bash
+# GAMMA=0.997 nécessite un commit (constante l.~84) puis :
+source .env.lightning && python crafter_dreamer/scripts/lightning_train_jax.py launch \
+    --run-name v20-gamma0997 --machine rtxp6000 --interruptible \
+    --extra-args="--no_health_auto_stop"
+```
+
+Gates v20 : best ≥ 4.0, creux ≥ 3.0, fin ≥ best v19b (3.40) avec wood/table en progression.
+
+### Leçons pipeline Lightning
+
+- `job.logs` indisponible PENDANT le run (limitation SDK) → temps réel = dashboard web uniquement
+- Health monitor : seuils à recalibrer (H<0.3 normal en burn-in entropy-fixe) — en attendant, `--no_health_auto_stop` systématique
+- RTXP 6000 + `--mp_collect` : 2.5× le débit L4 pour 2.5× le prix spot → même coût/iter, moitié moins d'attente. Run 30k estimé ~3h, ~$4.5 spot.
+- **Resume + persistance implémentés** (post-v20) : `--resume_from` côté script (soft resume : poids + iter, Adam/buffer repartent), `lightning_sync.py` up/down vers le storage teamspace (`oneiro/<run>/`), sync background toutes les 5 min dans les jobs (préemption spot = ≤5 min perdues), `--resume-from-job` et `pull` côté launcher. Le run 30k peut partir en spot sereinement.
+
+---
+
+## v20 — GAMMA 0.997 (H_310) : burn-in 4× plus lent, profil post-décollage prometteur
+
+**Statut : gates ratés à 4000 iter, MAIS asymptote indéterminée → v20b 8000 iter.**
+
+Un seul changement vs v19b : `GAMMA 0.99 → 0.997` (horizon de valeur ~100 → ~330 steps, aligné paper). ~$1, 25 min.
+
+### Trajectoire
+
+| Iter | argmax | sample | unlocked |
+|---|---|---|---|
+| 500-1500 | **0.00** | 0.0-0.4 | 0/22 — burn-in très lent |
+| 2000 | 0.90 | 0.80 | wake_up 90% |
+| 2500 | 2.20 | 1.80 | +sapling, cow |
+| 3000 | 2.00 | 2.20 | — |
+| 3500 | 2.60 | 2.60 | +place_plant, wood 30% |
+| 4000 | 2.50 | 3.00 ↑ | **5/22, wood 40%** (meilleur taux wood du projet à 4k) |
+
+### Le mécanisme du burn-in lent : « l'agent voit sa mort »
+
+À iter 1000-1500 : H=0.08 et **ret = -0.19, -0.39 (négatifs)**. Avec l'horizon 330, les returns imaginés capturent les pénalités de santé jusqu'à la mort (inévitable pour une policy débutante) → le signal dominant des 2000 premières iter est « tout mène à la mort » → le PG optimise la survie passive avant de chercher les +1. À γ=0.99 cette mortalité lointaine était invisible → décollage rapide. Coût structurel du long horizon, pas un bug.
+
+### Le profil post-décollage (la raison de continuer)
+
+- pente +0.8 ach/1000 iter sur 2000-4000, sample au max du run à 4000
+- les unlocked **s'empilent sans se perdre** (1→3→4→5) vs v19b qui perdait place_plant pendant que H remontait
+- `scale` monte en continu jusqu'à 2.81 (vs plafond ~1.9 à γ=0.99) — le système valorise plus loin
+- pas de signature du cycle H_311 sur la fenêtre observée
+
+---
+
+## v20b — γ=0.997 × 8000 iter (verdict gamma) + LA leçon variance
+
+**Statut : en cours.** Config identique à v20, 8000 iter pour voir l'asymptote.
+
+| Iter | argmax | sample | unlocked |
+|---|---|---|---|
+| 1500 | 2.80 | 2.40 | **6/22** (sapling, wake_up, drink, wood, cow, zombie) — répertoire le plus LARGE du projet à 1500 |
+| ... | (compléter à la fin du run) | | |
+
+### ⚠️ Leçon variance inter-run (importante pour TOUTES les comparaisons)
+
+v20 et v20b ont **la même config ET le même seed (42)** : v20 = 0.00 @ 1500, v20b = 2.80 @ 1500. Le non-déterminisme GPU (réductions XLA non bit-déterministes) suffit à faire bifurquer les runs — système chaotique. Conséquences :
+- la variance inter-run est de l'ordre de **±1-2 achievements**
+- les écarts fins entre runs uniques (v18 « 4.00 » vs v19b « 3.40 ») sont en partie du **bruit**
+- les conclusions fiables = tendances longues + multi-seeds ; les pics single-run ne classent pas les configs
+
+---
+
 ## v14 — Anti-spam OFF + entropy revert + adaptive ON (échec)
 
 **Statut : code validé, smoketest OK, en attente run Modal.**
