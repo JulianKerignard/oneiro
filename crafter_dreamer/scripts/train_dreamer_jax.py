@@ -61,7 +61,11 @@ from src_jax.model import (
 SEED = 42
 
 # Données — aligné config paper DreamerV3 Crafter (configs.yaml)
-BUFFER_CAPACITY = 500_000   # paper utilise 1M, mais 500k tient sur L4 24GB
+# 1M = paper. Couvre un run 30k iter ENTIER sans wrap FIFO (v21/H_312 : à
+# 500k le buffer était plein à iter 15.6k → écrasement de la diversité early
+# → perte de la capacité de récupération → dérive descendante après ~19k).
+# VRAM : ~12.3GB uint8 — large sur RTXP 96GB ; serré mais possible sur L4 24GB.
+BUFFER_CAPACITY = 1_000_000
 WARMUP_STEPS = 5_000
 
 # Training principal.
