@@ -86,7 +86,11 @@ LR_AC = 1e-4
 GRAD_CLIP = 1.0   # clipping strict (officiel utilise AGC, on garde global_norm mais beaucoup plus serré)
 
 # RL params
-GAMMA = 0.99
+# GAMMA 0.997 (paper) : horizon de valeur ~330 steps (vs ~100 à 0.99).
+# v18/v19b oscillaient car les returns imaginés mouraient une fois les
+# quick-wins saturés (H_311) — les chaînes profondes (wood→table→pickaxe)
+# étaient hors de l'horizon. 0.997 garde leur valeur visible.
+GAMMA = 0.997
 LAMBDA_GAE = 0.95
 # ENTROPY_COEF : 3e-4 = paper et TOUTES les refs (danijar, symoon11 17.65 ach,
 # NM512, sheeprl) — aucune n'utilise d'alpha adaptatif. L'audit a montré que
