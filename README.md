@@ -57,7 +57,6 @@ crafter_dreamer/        # Main training code (Crafter, stage 3)
 src_jax/                # JAX/Flax NNX modules (encoder, decoder, RSSM, actor, critic, heads, RND)
   buffer.py             # Per-env GPU-resident replay buffer
 src/                    # Original PyTorch implementation (reference)
-tetris/                 # Stages 1-2: Tetris grid + pixels (PyTorch)
 docs/                   # Run benchmark + hypothesis registry
 tests/                  # Numerical parity tests PyTorch ↔ JAX
 ```
