@@ -120,7 +120,10 @@ def _get_job(name):
 
 def cmd_logs(args):
     job = _get_job(args.run_name)
-    print(job.logs())
+    # job.logs est une propriété (str). N'est disponible qu'une fois le job
+    # terminé/arrêté (limitation SDK : pas de streaming pendant le run —
+    # utiliser le dashboard web pour le temps réel).
+    print(job.logs)
 
 
 def cmd_status(args):
