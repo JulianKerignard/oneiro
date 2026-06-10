@@ -6,9 +6,9 @@ A from-scratch reimplementation of [DreamerV3](https://arxiv.org/abs/2301.04104)
 
 **15.26M parameters** (≈ DreamerV3-S class) — current best: **4.0 achievements/episode after only 64k env steps** (Rainbow baseline: 4.3 at 1M steps).
 
-![agent](videos/v3_iter2000.gif)
+![agent](videos/oneiro_demo_opt.gif)
 
-*Early agent (v3) playing Crafter. The interesting part of this repo is less the score than the debugging journey — see below.*
+*Oneiro (v18 checkpoint, ~64k env steps) unlocking 5 achievements in one episode. The interesting part of this repo is less the score than the debugging journey — see below.*
 
 ## Why this repo might be useful to you
 
