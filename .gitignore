@@ -31,6 +31,10 @@ logs/
 # Videos: keep small demo gifs only
 videos/*_hd.gif
 
+# Secrets / local env (NEVER commit)
+.env
+.env.*
+
 # OS
 .DS_Store
 Thumbs.db
