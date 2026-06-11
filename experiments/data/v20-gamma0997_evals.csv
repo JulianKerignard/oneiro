@@ -1,0 +1,9 @@
+iter,env_steps,score,length,achievements,sample,n_unlocked,unlocked_detail
+500,16000,-0.9,146.0,0.0,0.4,0,
+1000,32000,-0.9,158.0,0.0,0.2,0,
+1500,48000,-0.9,159.0,0.0,0.0,0,
+2000,64000,-0.0,145.0,0.9,0.8,1,wake_up:90
+2500,80000,1.3,148.0,2.2,1.8,3,collect_sapling:100;wake_up:100;eat_cow:20
+3000,96000,1.1,178.0,2.0,2.2,2,collect_sapling:100;wake_up:100
+3500,112000,1.7,155.0,2.6,2.6,4,collect_sapling:100;wake_up:80;place_plant:50;collect_wood:30
+4000,128000,1.6,168.0,2.5,3.0,5,collect_sapling:90;wake_up:90;collect_wood:40;place_plant:20;collect_drink:10

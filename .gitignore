@@ -28,6 +28,8 @@ logs/
 *.npz
 *.h5
 *.log
+# ...mais les données d'expériences du paper SONT versionnées
+!experiments/raw_logs/*.log
 
 # Videos: keep small demo gifs only
 videos/*_hd.gif

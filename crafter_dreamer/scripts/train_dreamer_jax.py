@@ -1024,6 +1024,19 @@ def make_act_fn():
 # ============================== Eval (Python, séquentiel)
 
 
+def crafter_score(ach_counts: dict, n_episodes: int) -> float:
+    """
+    Score Crafter OFFICIEL (Hafner 2021) : moyenne géométrique des success
+    rates (en %) sur les 22 achievements, calculée sur les épisodes de
+    TRAINING. S = exp(mean(ln(1 + s_i))) - 1. C'est la métrique des papers.
+    """
+    if n_episodes == 0:
+        return 0.0
+    import math
+    rates = [100.0 * ach_counts.get(name, 0) / n_episodes for name in ACHIEVEMENTS]
+    return math.exp(sum(math.log(1.0 + r) for r in rates) / len(rates)) - 1.0
+
+
 def _format_eta(seconds: float) -> str:
     """Formate un temps restant en h/m/s compact (ex: 3h45, 12m, 45s)."""
     seconds = int(max(0.0, seconds))
@@ -1136,7 +1149,10 @@ def _env_worker(seed: int, conn):
 
     Protocole :
         ("reset", _)        -> envoie obs (np.float32, C,H,W)
-        ("step", action)    -> envoie (next_obs, reward, done) avec auto-reset si done
+        ("step", action)    -> envoie (next_obs, reward, done, ep_unlocked)
+                               où ep_unlocked = liste des achievements de
+                               l'épisode si done (capturés AVANT l'auto-reset,
+                               pour le score Crafter officiel), sinon None
         ("close", _)        -> termine la boucle
     """
     # Imports locaux pour éviter de polluer le parent (et JAX peut être lent à import)
@@ -1153,9 +1169,11 @@ def _env_worker(seed: int, conn):
             elif cmd == "step":
                 a = int(payload)
                 next_obs, r, done, _ = env.step(a)
+                ep_unlocked = None
                 if done:
+                    ep_unlocked = sorted(env.unlocked_names)
                     next_obs = env.reset()
-                conn.send((next_obs, float(r), bool(done)))
+                conn.send((next_obs, float(r), bool(done), ep_unlocked))
             elif cmd == "close":
                 conn.close()
                 return
@@ -1260,6 +1278,9 @@ def parse_args():
     p.add_argument("--warmup_steps", type=int, default=WARMUP_STEPS)
     p.add_argument("--profile", action="store_true",
                    help="Active le profiling fin (breakdown collect/WM/AC/transfer).")
+    p.add_argument("--buffer_capacity", type=int, default=BUFFER_CAPACITY,
+                   help=f"Taille du replay buffer (défaut {BUFFER_CAPACITY} = paper ; "
+                        "~12.3GB VRAM à 1M. Réduire pour smoketests locaux).")
     p.add_argument("--resume_from", type=str, default=None,
                    help="Checkpoint .npz à charger pour reprendre le training "
                         "(reprend à l'iter du .meta.json). Le buffer repart du "
@@ -1422,7 +1443,7 @@ def main():
     # seul env (fix bug interleaving : avant, chaque séquence de 64 steps
     # changeait d'env à chaque step → dynamique fictive apprise par le prior).
     buffer = ImageReplayBufferJAX(
-        capacity=BUFFER_CAPACITY, obs_shape=obs_shape, n_envs=n_envs,
+        capacity=args.buffer_capacity, obs_shape=obs_shape, n_envs=n_envs,
     )
 
     # ----------- Setup models
@@ -1595,8 +1616,18 @@ def main():
         "loss_wm": [], "loss_recon": [], "loss_kl": [], "loss_reward": [], "loss_continue": [],
         "loss_actor": [], "loss_critic": [], "entropy": [],
         "env_reward_per_step": [],
+        # Métriques fines pour les figures du paper (par LOG_INTERVAL)
+        "loss_pg": [], "returns_mean": [], "values_mean": [],
+        "return_scale": [], "return_p5": [], "return_p95": [], "ips": [],
+        # Par EVAL
         "eval_iter": [], "eval_score": [], "eval_length": [], "eval_achievements": [],
+        "eval_sample": [], "eval_detail": [], "eval_crafter_score": [],
+        "eval_train_episodes": [],
     }
+
+    # Protocole Crafter officiel : compteurs sur les épisodes de TRAINING
+    train_episode_count = 0
+    train_ach_counts = {}
 
     collected_rewards = []
     # RSSM state multi-env pour la collecte
@@ -1711,9 +1742,12 @@ def main():
                 for i, env in enumerate(envs):
                     a = int(actions_int_np[i])
                     next_obs, r, done, _ = env.step(a)
+                    ep_unlocked = None
                     if done:
+                        # Achievements de l'épisode AVANT le reset (score Crafter officiel)
+                        ep_unlocked = sorted(env.unlocked_names)
                         next_obs = env.reset()
-                    results.append((next_obs, r, done))
+                    results.append((next_obs, r, done, ep_unlocked))
             prof.toc()
 
             # --- transfer + buffer_add : copies CPU <-> GPU + insertion buffer
@@ -1744,7 +1778,7 @@ def main():
             step_extr_sum = 0.0
             step_bonus_sum = 0.0
             for i in range(n_envs):
-                next_obs, r, done = results[i]
+                next_obs, r, done, ep_unlocked = results[i]
                 a = int(actions_int_np[i])
                 # Reward extrinsèque + bonus intrinsèque RND (si activé)
                 bonus_i = float(rnd_bonuses[i]) if rnd_bonuses is not None else 0.0
@@ -1757,6 +1791,11 @@ def main():
                 if done:
                     new_h_arr[i] = 0.0
                     new_z_arr[i] = 0.0
+                    # Protocole Crafter officiel : success rates sur les
+                    # épisodes de TRAINING (pas l'eval) → score = geom mean
+                    train_episode_count += 1
+                    for name in (ep_unlocked or []):
+                        train_ach_counts[name] = train_ach_counts.get(name, 0) + 1
                 else:
                     new_prev_actions[i, a] = 1.0
                 new_obs_list.append(next_obs)
@@ -1921,6 +1960,13 @@ def main():
             history["env_reward_per_step"].append(
                 float(np.mean(collected_rewards[-1000:])) if collected_rewards else 0.0
             )
+            history["loss_pg"].append(vals.get("loss_actor_pg", 0.0))
+            history["returns_mean"].append(vals.get("returns_mean", 0.0))
+            history["values_mean"].append(vals.get("values_mean", 0.0))
+            history["return_scale"].append(vals.get("return_scale", 1.0))
+            history["return_p5"].append(float(return_ema_std[0]))
+            history["return_p95"].append(float(return_ema_std[1]))
+            history["ips"].append(float(ips))
 
             # ETA : iters restants × temps moyen par iter écoulé
             iters_left = args.train_iter - (it + 1)
@@ -1995,6 +2041,12 @@ def main():
             history["eval_score"].append(eval_res["score"])
             history["eval_length"].append(eval_res["length"])
             history["eval_achievements"].append(eval_res["achievements"])
+            history["eval_sample"].append(eval_res.get("achievements_sample", 0.0))
+            history["eval_detail"].append(eval_res.get("achievements_detail", {}))
+            # Score Crafter OFFICIEL (succès cumulés sur les épisodes de training)
+            cscore = crafter_score(train_ach_counts, train_episode_count)
+            history["eval_crafter_score"].append(cscore)
+            history["eval_train_episodes"].append(train_episode_count)
             ach_now = eval_res["achievements"]
 
             # Best-so-far (indépendant de auto_explore)
@@ -2010,7 +2062,8 @@ def main():
                 f"score={eval_res['score']:.2f}  length={eval_res['length']:.0f}  "
                 f"achievements={ach_now:.2f} {trend}  "
                 f"sample={eval_res.get('achievements_sample', 0.0):.2f}  "
-                f"(best={eval_best_ach:.2f} @{eval_best_iter})"
+                f"(best={eval_best_ach:.2f} @{eval_best_iter})  "
+                f"crafter_score={cscore:.2f}% [{train_episode_count} train eps]"
             )
             # Détail par achievement : taux de réussite trié décroissant.
             # Crucial pour voir la progression hiérarchique (collect_wood →
@@ -2056,13 +2109,30 @@ def main():
             )
             print(f"  Checkpoint saved : {ckpt_path.name}")
 
-            # Save summary JSON
+            # Save summary JSON — LE fichier de données du run (figures paper).
+            # Contient TOUT : config, history complet des métriques fines,
+            # toutes les EVAL avec détail par achievement, et le protocole
+            # Crafter officiel (success rates training + score).
+            train_success_rates = {
+                name: train_ach_counts.get(name, 0) / max(1, train_episode_count)
+                for name in ACHIEVEMENTS
+            }
             summary_path = runs_dir / f"dreamer_crafter_jax_summary_{args.run_name}.json"
             with open(summary_path, "w") as f:
                 json.dump({
                     "run_name": args.run_name,
                     "iter": it + 1,
                     "total_iter": args.train_iter,
+                    "env_steps_per_iter": COLLECT_PER_ITER,
+                    "config": {k: v for k, v in vars(args).items()
+                               if isinstance(v, (int, float, str, bool, type(None)))},
+                    "constants": {
+                        "GAMMA": GAMMA, "LAMBDA_GAE": LAMBDA_GAE,
+                        "ENTROPY_COEF": ENTROPY_COEF, "LR_WM": LR_WM, "LR_AC": LR_AC,
+                        "BUFFER_CAPACITY": args.buffer_capacity, "SEQ_LEN": SEQ_LEN,
+                        "IMAGINATION_HORIZON": IMAGINATION_HORIZON,
+                        "H_DIM": H_DIM, "EMBED_DIM": EMBED_DIM, "HIDDEN_DIM": HIDDEN_DIM,
+                    },
                     "last_eval_score": float(eval_res["score"]),
                     "last_eval_length": float(eval_res["length"]),
                     "last_eval_achievements": float(eval_res["achievements"]),
@@ -2070,9 +2140,12 @@ def main():
                     "last_eval_achievements_detail": eval_res.get("achievements_detail", {}),
                     "best_eval_achievements": float(eval_best_ach),
                     "best_eval_iter": int(eval_best_iter),
-                    "history_eval_iter": history["eval_iter"],
-                    "history_eval_achievements": history["eval_achievements"],
-                    "history_eval_score": history["eval_score"],
+                    # Protocole Crafter OFFICIEL (épisodes de training)
+                    "crafter_score": float(cscore),
+                    "train_episode_count": int(train_episode_count),
+                    "train_success_rates": train_success_rates,
+                    # History complet (métriques fines + toutes les EVAL)
+                    "history": history,
                 }, f, indent=2)
 
             # Nettoyer les anciens checkpoints (garder 3 derniers)

@@ -1,0 +1,351 @@
+debconf: unable to initialize frontend: Dialog
+debconf: (No usable dialog-like program is installed, so the dialog based frontend cannot be used. at /usr/share/perl5/Debconf/FrontEnd/Dialog.pm line 79, <STDIN> line 49.)
+debconf: falling back to frontend: Readline
+debconf: unable to initialize frontend: Readline
+debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC entries checked: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.40.1 /usr/local/share/perl/5.40.1 /usr/lib/x86_64-linux-gnu/perl5/5.40 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.40 /usr/share/perl/5.40 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 8, <STDIN> line 49.)
+debconf: falling back to frontend: Teletype
+Cloning into '/work'...
+remote: Enumerating objects: 57, done.[K
+remote: Counting objects:   8% (5/57)[K
+remote: Counting objects:   8% (5/57)[K
+remote: Counting objects:  19% (11/57)[K
+remote: Counting objects:   8% (5/57)[K
+remote: Counting objects:  19% (11/57)[K
+remote: Counting objects:  29% (17/57)[K
+remote: Counting objects:   8% (5/57)[K
+remote: Counting objects:  19% (11/57)[K
+remote: Counting objects:  29% (17/57)[K
+remote: Counting objects:  40% (23/57)[K
+remote: Counting objects:   8% (5/57)[K
+remote: Counting objects:  19% (11/57)[K
+remote: Counting objects:  29% (17/57)[K
+remote: Counting objects:  40% (23/57)[K
+remote: Counting objects:  50% (29/57)[K
+remote: Counting objects:   8% (5/57)[K
+remote: Counting objects:  19% (11/57)[K
+remote: Counting objects:  29% (17/57)[K
+remote: Counting objects:  40% (23/57)[K
+remote: Counting objects:  50% (29/57)[K
+remote: Counting objects:  61% (35/57)[K
+remote: Counting objects:   8% (5/57)[K
+remote: Counting objects:  19% (11/57)[K
+remote: Counting objects:  29% (17/57)[K
+remote: Counting objects:  40% (23/57)[K
+remote: Counting objects:  50% (29/57)[K
+remote: Counting objects:  61% (35/57)[K
+remote: Counting objects:  71% (41/57)[K
+remote: Counting objects:   8% (5/57)[K
+remote: Counting objects:  19% (11/57)[K
+remote: Counting objects:  29% (17/57)[K
+remote: Counting objects:  40% (23/57)[K
+remote: Counting objects:  50% (29/57)[K
+remote: Counting objects:  61% (35/57)[K
+remote: Counting objects:  71% (41/57)[K
+remote: Counting objects:  82% (47/57)[K
+remote: Counting objects:   8% (5/57)[K
+remote: Counting objects:  19% (11/57)[K
+remote: Counting objects:  29% (17/57)[K
+remote: Counting objects:  40% (23/57)[K
+remote: Counting objects:  50% (29/57)[K
+remote: Counting objects:  61% (35/57)[K
+remote: Counting objects:  71% (41/57)[K
+remote: Counting objects:  82% (47/57)[K
+remote: Counting objects:  92% (53/57)[K
+remote: Compressing objects:  10% (5/48)[K
+remote: Compressing objects:  10% (5/48)[K
+remote: Compressing objects:  20% (10/48)[K
+remote: Compressing objects:  10% (5/48)[K
+remote: Compressing objects:  20% (10/48)[K
+remote: Compressing objects:  31% (15/48)[K
+remote: Compressing objects:  10% (5/48)[K
+remote: Compressing objects:  20% (10/48)[K
+remote: Compressing objects:  31% (15/48)[K
+remote: Compressing objects:  41% (20/48)[K
+remote: Compressing objects:  10% (5/48)[K
+remote: Compressing objects:  20% (10/48)[K
+remote: Compressing objects:  31% (15/48)[K
+remote: Compressing objects:  41% (20/48)[K
+remote: Compressing objects:  52% (25/48)[K
+remote: Compressing objects:  10% (5/48)[K
+remote: Compressing objects:  20% (10/48)[K
+remote: Compressing objects:  31% (15/48)[K
+remote: Compressing objects:  41% (20/48)[K
+remote: Compressing objects:  52% (25/48)[K
+remote: Compressing objects:  62% (30/48)[K
+remote: Compressing objects:  10% (5/48)[K
+remote: Compressing objects:  20% (10/48)[K
+remote: Compressing objects:  31% (15/48)[K
+remote: Compressing objects:  41% (20/48)[K
+remote: Compressing objects:  52% (25/48)[K
+remote: Compressing objects:  62% (30/48)[K
+remote: Compressing objects:  72% (35/48)[K
+remote: Compressing objects:  10% (5/48)[K
+remote: Compressing objects:  20% (10/48)[K
+remote: Compressing objects:  31% (15/48)[K
+remote: Compressing objects:  41% (20/48)[K
+remote: Compressing objects:  52% (25/48)[K
+remote: Compressing objects:  62% (30/48)[K
+remote: Compressing objects:  72% (35/48)[K
+remote: Compressing objects:  83% (40/48)[K
+remote: Compressing objects:  10% (5/48)[K
+remote: Compressing objects:  20% (10/48)[K
+remote: Compressing objects:  31% (15/48)[K
+remote: Compressing objects:  41% (20/48)[K
+remote: Compressing objects:  52% (25/48)[K
+remote: Compressing objects:  62% (30/48)[K
+remote: Compressing objects:  72% (35/48)[K
+remote: Compressing objects:  83% (40/48)[K
+remote: Compressing objects:  93% (45/48)[K
+Receiving objects:   8% (5/57)
+Receiving objects:   8% (5/57)
+Receiving objects:  19% (11/57)
+Receiving objects:   8% (5/57)
+Receiving objects:  19% (11/57)
+Receiving objects:  29% (17/57)
+Receiving objects:   8% (5/57)
+Receiving objects:  19% (11/57)
+Receiving objects:  29% (17/57)
+Receiving objects:  40% (23/57)
+Receiving objects:   8% (5/57)
+Receiving objects:  19% (11/57)
+Receiving objects:  29% (17/57)
+Receiving objects:  40% (23/57)
+Receiving objects:  50% (29/57)
+Receiving objects:   8% (5/57)
+Receiving objects:  19% (11/57)
+Receiving objects:  29% (17/57)
+Receiving objects:  40% (23/57)
+Receiving objects:  50% (29/57)
+Receiving objects:  59% (34/57)
+Receiving objects:   8% (5/57)
+Receiving objects:  19% (11/57)
+Receiving objects:  29% (17/57)
+Receiving objects:  40% (23/57)
+Receiving objects:  50% (29/57)
+Receiving objects:  59% (34/57)
+Receiving objects:  70% (40/57)
+Receiving objects:   8% (5/57)
+Receiving objects:  19% (11/57)
+Receiving objects:  29% (17/57)
+Receiving objects:  40% (23/57)
+Receiving objects:  50% (29/57)
+Receiving objects:  59% (34/57)
+Receiving objects:  70% (40/57)
+Receiving objects:  80% (46/57)
+Receiving objects:   8% (5/57)
+Receiving objects:  19% (11/57)
+Receiving objects:  29% (17/57)
+Receiving objects:  40% (23/57)
+Receiving objects:  50% (29/57)
+Receiving objects:  59% (34/57)
+Receiving objects:  70% (40/57)
+Receiving objects:  80% (46/57)
+Receiving objects:  91% (52/57)
+Receiving objects: 100% (57/57)
+Receiving objects: 100% (57/57)
+Receiving objects: 100% (57/57), 291.90 KiB | 41.70 MiB/s, done.
+Resolving deltas:   0% (0/7)
+Resolving deltas:   0% (0/7)
+Resolving deltas:  14% (1/7)
+Resolving deltas:   0% (0/7)
+Resolving deltas:  14% (1/7)
+Resolving deltas:  28% (2/7)
+Resolving deltas:   0% (0/7)
+Resolving deltas:  14% (1/7)
+Resolving deltas:  28% (2/7)
+Resolving deltas:  42% (3/7)
+Resolving deltas:   0% (0/7)
+Resolving deltas:  14% (1/7)
+Resolving deltas:  28% (2/7)
+Resolving deltas:  42% (3/7)
+Resolving deltas:  57% (4/7)
+Resolving deltas:   0% (0/7)
+Resolving deltas:  14% (1/7)
+Resolving deltas:  28% (2/7)
+Resolving deltas:  42% (3/7)
+Resolving deltas:  57% (4/7)
+Resolving deltas:  85% (6/7)
+Resolving deltas:   0% (0/7)
+Resolving deltas:  14% (1/7)
+Resolving deltas:  28% (2/7)
+Resolving deltas:  42% (3/7)
+Resolving deltas:  57% (4/7)
+Resolving deltas:  85% (6/7)
+Resolving deltas: 100% (7/7)
+Resolving deltas:   0% (0/7)
+Resolving deltas:  14% (1/7)
+Resolving deltas:  28% (2/7)
+Resolving deltas:  42% (3/7)
+Resolving deltas:  57% (4/7)
+Resolving deltas:  85% (6/7)
+Resolving deltas: 100% (7/7)
+Resolving deltas: 100% (7/7), done.
+[33mWARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv[0m[33m
+[0m
+[1m[[0m[34;49mnotice[0m[1;39;49m][0m[39;49m A new release of pip is available: [0m[31;49m24.0[0m[39;49m -> [0m[32;49m26.1.2[0m
+[1m[[0m[34;49mnotice[0m[1;39;49m][0m[39;49m To update, run: [0m[32;49mpip install --upgrade pip[0m
+[33mWARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv[0m[33m
+[0m
+[1m[[0m[34;49mnotice[0m[1;39;49m][0m[39;49m A new release of pip is available: [0m[31;49m24.0[0m[39;49m -> [0m[32;49m26.1.2[0m
+[1m[[0m[34;49mnotice[0m[1;39;49m][0m[39;49m To update, run: [0m[32;49mpip install --upgrade pip[0m
+JAX backend : gpu
+Device      : [CudaDevice(id=0)]
+Run         : v19b-fast-critic-nohealthstop
+Config      : entropy=0.0003  train_iter=4000  n_envs=16  batch=16  seq_len=64
+Optim       : lr_wm=1.0e-04  lr_ac=1.0e-04  lr_alpha=1.0e-03  grad_clip=1.0  horizon=16
+Replay      : collect/iter=32  wm_train/iter=4  ac_train/iter=1  → train_ratio≈128
+Flags       : adaptive_alpha=False  auto_explore=False  use_rnd=False
+
+Adaptive α : OFF (entropy_coef fixe = 0.0003)
+RND        : OFF
+Auto-explore : OFF
+
+============================================================
+Architecture
+============================================================
+  WM modules (CNNEnc+RSSM+CNNDec+heads) : 12,386,691 params
+  Actor + Critic                        : 2,872,592 params
+  TOTAL                                 : 15,259,283 params (~15.26M)
+
+Output dirs : runs=/work/runs  checkpoints=/work/checkpoints
+
+============================================================
+Phase 0 : Warmup random (5000 steps, 16 envs)
+============================================================
+Buffer : 4992 transitions en 18.6s
+         Mémoire buffer : 6150.0 MB
+
+============================================================
+Phase 1 : Training Dreamer JAX (4000 itérations)
+============================================================
+[Phase 13] Safeguards : warmup=5000  adaptive_rnd=True  health_auto_stop=False  h_target_schedule=True [1.13→1.13 over 10000]
+[MP] Pool multiprocessing initialisé (16 workers)
+  iter    50/4000 [ 1.2%] | WM wm=179.86 rec=177.17 kl=2.50 rew=0.168 con=0.013 | AC act=0.104 crit=4.071 pg=0.105 H=2.38 | img ret=0.07 val=0.02 scale=1.00 p5=-0.03 p95=0.06 | r/step=0.0252 | 0.6 ips ETA 1h44
+  iter   100/4000 [ 2.5%] | WM wm=91.11 rec=88.60 kl=2.33 rew=0.167 con=0.015 | AC act=0.008 crit=2.169 pg=0.008 H=0.08 | img ret=0.19 val=0.09 scale=1.00 p5=0.01 p95=0.11 | r/step=-0.0011 | 1.1 ips ETA 1h01
+  [health] WARN H_collapse: H=0.08
+  iter   150/4000 [ 3.8%] | WM wm=100.48 rec=97.50 kl=2.79 rew=0.169 con=0.015 | AC act=0.002 crit=1.813 pg=0.002 H=0.08 | img ret=0.13 val=0.10 scale=1.00 p5=0.03 p95=0.19 | r/step=0.0003 | 1.4 ips ETA 46m01
+  [health] WARN H_collapse: H=0.08
+  iter   200/4000 [ 5.0%] | WM wm=64.30 rec=61.18 kl=2.95 rew=0.158 con=0.010 | AC act=-0.002 crit=1.597 pg=-0.002 H=0.09 | img ret=0.06 val=0.09 scale=1.00 p5=-0.01 p95=0.20 | r/step=0.0010 | 1.6 ips ETA 39m56
+  [health] WARN H_collapse: H=0.09
+  iter   250/4000 [ 6.2%] | WM wm=67.35 rec=64.73 kl=2.46 rew=0.145 con=0.016 | AC act=0.001 crit=1.670 pg=0.001 H=0.08 | img ret=0.13 val=0.11 scale=1.00 p5=-0.04 p95=0.21 | r/step=0.0171 | 1.8 ips ETA 35m19
+  [health] WARN H_collapse: H=0.08
+  iter   300/4000 [ 7.5%] | WM wm=49.19 rec=46.60 kl=2.45 rew=0.125 con=0.018 | AC act=0.001 crit=1.617 pg=0.001 H=0.08 | img ret=0.18 val=0.16 scale=1.00 p5=-0.07 p95=0.25 | r/step=0.0066 | 1.9 ips ETA 31m51
+  [health] WARN H_collapse: H=0.08
+  [health] WARN FATAL: H_collapse persistent (consec=5)
+  iter   350/4000 [ 8.8%] | WM wm=58.63 rec=56.01 kl=2.43 rew=0.165 con=0.019 | AC act=-0.001 crit=1.507 pg=-0.001 H=0.08 | img ret=0.08 val=0.08 scale=1.00 p5=-0.09 p95=0.29 | r/step=0.0029 | 2.1 ips ETA 29m32
+  [health] WARN H_collapse: H=0.08
+  [health] WARN FATAL: H_collapse persistent (consec=6)
+  iter   400/4000 [10.0%] | WM wm=60.47 rec=57.35 kl=2.92 rew=0.181 con=0.014 | AC act=0.001 crit=1.416 pg=0.001 H=0.08 | img ret=0.10 val=0.10 scale=1.00 p5=-0.11 p95=0.34 | r/step=-0.0011 | 2.2 ips ETA 27m15
+  [health] WARN H_collapse: H=0.08
+  [health] WARN FATAL: H_collapse persistent (consec=7)
+  iter   450/4000 [11.2%] | WM wm=48.26 rec=44.98 kl=3.07 rew=0.182 con=0.027 | AC act=-0.000 crit=1.446 pg=-0.000 H=0.08 | img ret=0.06 val=0.07 scale=1.00 p5=-0.14 p95=0.37 | r/step=0.0046 | 2.3 ips ETA 26m09
+  [health] WARN H_collapse: H=0.08
+  [health] WARN FATAL: H_collapse persistent (consec=8)
+  iter   500/4000 [12.5%] | WM wm=42.08 rec=38.62 kl=3.27 rew=0.169 con=0.019 | AC act=-0.003 crit=1.363 pg=-0.003 H=0.45 | img ret=0.13 val=0.13 scale=1.00 p5=-0.16 p95=0.41 | r/step=0.0018 | 2.3 ips ETA 25m03
+  >>> EVAL @ iter 500 : score=0.30  length=161  achievements=1.20 =  sample=1.80  (best=1.20 @500)
+      unlocked (3/22): collect_sapling=100%  defeat_zombie=10%  eat_cow=10%
+  Checkpoint saved : dreamer_crafter_jax_v19b-fast-critic-nohealthstop_iter000500.npz
+  iter   550/4000 [13.8%] | WM wm=39.25 rec=35.98 kl=3.07 rew=0.173 con=0.030 | AC act=0.003 crit=1.462 pg=0.004 H=0.54 | img ret=0.23 val=0.20 scale=1.00 p5=-0.19 p95=0.46 | r/step=0.0089 | 2.2 ips ETA 26m23
+  iter   600/4000 [15.0%] | WM wm=38.44 rec=35.36 kl=2.93 rew=0.121 con=0.025 | AC act=-0.004 crit=1.484 pg=-0.004 H=0.28 | img ret=0.09 val=0.10 scale=1.00 p5=-0.20 p95=0.53 | r/step=0.0024 | 2.2 ips ETA 25m12
+  [health] WARN H_collapse: H=0.28
+  iter   650/4000 [16.2%] | WM wm=44.79 rec=41.40 kl=3.23 rew=0.140 con=0.012 | AC act=0.011 crit=1.875 pg=0.011 H=0.33 | img ret=0.31 val=0.24 scale=1.00 p5=-0.22 p95=0.73 | r/step=0.0107 | 2.3 ips ETA 24m06
+  iter   700/4000 [17.5%] | WM wm=33.21 rec=29.86 kl=3.18 rew=0.144 con=0.025 | AC act=0.010 crit=1.882 pg=0.010 H=0.35 | img ret=0.43 val=0.39 scale=1.13 p5=-0.23 p95=0.90 | r/step=0.0099 | 2.4 ips ETA 23m14
+  iter   750/4000 [18.8%] | WM wm=51.78 rec=47.53 kl=4.15 rew=0.097 con=0.008 | AC act=0.002 crit=1.844 pg=0.003 H=0.35 | img ret=0.28 val=0.28 scale=1.29 p5=-0.25 p95=1.05 | r/step=0.0040 | 2.4 ips ETA 22m21
+  iter   800/4000 [20.0%] | WM wm=49.89 rec=45.57 kl=4.13 rew=0.179 con=0.018 | AC act=0.006 crit=1.808 pg=0.006 H=0.42 | img ret=0.29 val=0.26 scale=1.39 p5=-0.26 p95=1.13 | r/step=0.0155 | 2.5 ips ETA 21m44
+  iter   850/4000 [21.2%] | WM wm=45.73 rec=41.34 kl=4.22 rew=0.139 con=0.019 | AC act=0.017 crit=1.695 pg=0.017 H=0.42 | img ret=0.42 val=0.36 scale=1.47 p5=-0.27 p95=1.21 | r/step=0.0065 | 2.5 ips ETA 20m59
+  iter   900/4000 [22.5%] | WM wm=42.94 rec=38.96 kl=3.84 rew=0.129 con=0.006 | AC act=-0.001 crit=1.625 pg=-0.001 H=0.50 | img ret=0.42 val=0.42 scale=1.57 p5=-0.28 p95=1.29 | r/step=0.0025 | 2.5 ips ETA 20m23
+  iter   950/4000 [23.8%] | WM wm=45.62 rec=41.73 kl=3.77 rew=0.107 con=0.009 | AC act=-0.004 crit=1.804 pg=-0.004 H=0.48 | img ret=0.23 val=0.22 scale=1.63 p5=-0.30 p95=1.34 | r/step=0.0072 | 2.6 ips ETA 19m46
+  iter  1000/4000 [25.0%] | WM wm=44.62 rec=40.19 kl=4.33 rew=0.095 con=0.005 | AC act=0.018 crit=2.075 pg=0.019 H=0.41 | img ret=0.68 val=0.55 scale=1.67 p5=-0.29 p95=1.38 | r/step=0.0190 | 2.6 ips ETA 19m09
+  >>> EVAL @ iter 1000 : score=2.20  length=147  achievements=3.20 ↑  sample=3.60  (best=3.20 @1000)
+      unlocked (5/22): collect_sapling=100%  place_plant=100%  wake_up=100%  collect_drink=10%  defeat_zombie=10%
+  Checkpoint saved : dreamer_crafter_jax_v19b-fast-critic-nohealthstop_iter001000.npz
+  iter  1050/4000 [26.2%] | WM wm=39.01 rec=34.88 kl=3.87 rew=0.229 con=0.023 | AC act=-0.001 crit=1.667 pg=-0.001 H=0.34 | img ret=0.62 val=0.62 scale=1.71 p5=-0.29 p95=1.42 | r/step=0.0159 | 2.5 ips ETA 19m41
+  iter  1100/4000 [27.5%] | WM wm=40.67 rec=36.41 kl=4.06 rew=0.170 con=0.017 | AC act=-0.001 crit=1.664 pg=-0.001 H=0.30 | img ret=0.37 val=0.37 scale=1.72 p5=-0.28 p95=1.43 | r/step=0.0128 | 2.5 ips ETA 19m10
+  [health] WARN H_collapse: H=0.30
+  iter  1150/4000 [28.8%] | WM wm=33.91 rec=30.21 kl=3.59 rew=0.103 con=0.008 | AC act=0.000 crit=1.600 pg=0.000 H=0.27 | img ret=0.52 val=0.51 scale=1.76 p5=-0.28 p95=1.48 | r/step=0.0125 | 2.6 ips ETA 18m37
+  [health] WARN H_collapse: H=0.27
+  iter  1200/4000 [30.0%] | WM wm=36.67 rec=32.42 kl=4.02 rew=0.208 con=0.023 | AC act=0.003 crit=1.677 pg=0.003 H=0.30 | img ret=0.53 val=0.51 scale=1.81 p5=-0.28 p95=1.53 | r/step=0.0140 | 2.6 ips ETA 18m12
+  iter  1250/4000 [31.2%] | WM wm=30.03 rec=25.92 kl=3.97 rew=0.129 con=0.012 | AC act=-0.002 crit=1.712 pg=-0.002 H=0.37 | img ret=0.37 val=0.36 scale=1.84 p5=-0.29 p95=1.55 | r/step=0.0128 | 2.6 ips ETA 17m40
+  iter  1300/4000 [32.5%] | WM wm=33.85 rec=29.22 kl=4.43 rew=0.182 con=0.013 | AC act=-0.004 crit=1.432 pg=-0.004 H=0.44 | img ret=0.22 val=0.24 scale=1.87 p5=-0.30 p95=1.57 | r/step=0.0186 | 2.6 ips ETA 17m12
+  iter  1350/4000 [33.8%] | WM wm=26.81 rec=22.82 kl=3.82 rew=0.152 con=0.013 | AC act=-0.004 crit=1.625 pg=-0.003 H=0.49 | img ret=0.53 val=0.54 scale=1.89 p5=-0.31 p95=1.58 | r/step=0.0061 | 2.6 ips ETA 16m47
+  iter  1400/4000 [35.0%] | WM wm=35.50 rec=30.81 kl=4.54 rew=0.138 con=0.018 | AC act=-0.004 crit=1.599 pg=-0.004 H=0.46 | img ret=0.27 val=0.29 scale=1.91 p5=-0.33 p95=1.58 | r/step=0.0128 | 2.7 ips ETA 16m18
+  iter  1450/4000 [36.2%] | WM wm=32.06 rec=27.69 kl=4.23 rew=0.135 con=0.013 | AC act=-0.012 crit=1.639 pg=-0.012 H=0.53 | img ret=0.15 val=0.20 scale=1.92 p5=-0.34 p95=1.58 | r/step=0.0224 | 2.7 ips ETA 15m58
+  iter  1500/4000 [37.5%] | WM wm=30.63 rec=26.05 kl=4.40 rew=0.161 con=0.017 | AC act=0.003 crit=1.660 pg=0.003 H=0.58 | img ret=0.50 val=0.46 scale=1.93 p5=-0.36 p95=1.58 | r/step=0.0019 | 2.7 ips ETA 15m31
+  >>> EVAL @ iter 1500 : score=2.30  length=183  achievements=3.30 ↑  sample=3.20  (best=3.30 @1500)
+      unlocked (4/22): collect_sapling=100%  place_plant=100%  wake_up=100%  collect_wood=30%
+  Checkpoint saved : dreamer_crafter_jax_v19b-fast-critic-nohealthstop_iter001500.npz
+  iter  1550/4000 [38.8%] | WM wm=39.02 rec=34.06 kl=4.78 rew=0.170 con=0.011 | AC act=-0.008 crit=1.530 pg=-0.008 H=0.70 | img ret=0.29 val=0.32 scale=1.96 p5=-0.37 p95=1.59 | r/step=0.0151 | 2.6 ips ETA 15m47
+  iter  1600/4000 [40.0%] | WM wm=34.14 rec=29.93 kl=4.05 rew=0.150 con=0.006 | AC act=-0.004 crit=1.691 pg=-0.004 H=0.57 | img ret=0.35 val=0.35 scale=1.97 p5=-0.39 p95=1.58 | r/step=0.0089 | 2.6 ips ETA 15m21
+  iter  1650/4000 [41.2%] | WM wm=29.60 rec=24.89 kl=4.55 rew=0.145 con=0.019 | AC act=-0.006 crit=1.559 pg=-0.006 H=0.67 | img ret=0.26 val=0.28 scale=1.97 p5=-0.40 p95=1.56 | r/step=0.0107 | 2.6 ips ETA 14m59
+  iter  1700/4000 [42.5%] | WM wm=42.94 rec=37.40 kl=5.41 rew=0.116 con=0.007 | AC act=-0.002 crit=1.743 pg=-0.002 H=0.73 | img ret=0.01 val=0.00 scale=1.97 p5=-0.42 p95=1.54 | r/step=0.0042 | 2.6 ips ETA 14m31
+  iter  1750/4000 [43.8%] | WM wm=32.66 rec=27.81 kl=4.67 rew=0.157 con=0.015 | AC act=-0.007 crit=1.552 pg=-0.007 H=0.67 | img ret=0.05 val=0.07 scale=1.96 p5=-0.44 p95=1.52 | r/step=0.0179 | 2.6 ips ETA 14m10
+  iter  1800/4000 [45.0%] | WM wm=25.02 rec=20.74 kl=4.10 rew=0.170 con=0.013 | AC act=-0.002 crit=1.649 pg=-0.002 H=0.71 | img ret=0.11 val=0.12 scale=1.97 p5=-0.45 p95=1.51 | r/step=0.0091 | 2.7 ips ETA 13m44
+  iter  1850/4000 [46.2%] | WM wm=35.78 rec=31.36 kl=4.32 rew=0.100 con=0.007 | AC act=-0.014 crit=1.721 pg=-0.014 H=0.73 | img ret=0.15 val=0.18 scale=1.95 p5=-0.47 p95=1.49 | r/step=0.0186 | 2.7 ips ETA 13m23
+  iter  1900/4000 [47.5%] | WM wm=31.67 rec=26.78 kl=4.71 rew=0.156 con=0.016 | AC act=-0.022 crit=1.793 pg=-0.021 H=0.66 | img ret=0.23 val=0.30 scale=1.94 p5=-0.48 p95=1.46 | r/step=0.0078 | 2.7 ips ETA 12m59
+  iter  1950/4000 [48.8%] | WM wm=29.93 rec=24.97 kl=4.76 rew=0.179 con=0.019 | AC act=-0.001 crit=1.641 pg=-0.001 H=0.48 | img ret=0.27 val=0.26 scale=1.93 p5=-0.49 p95=1.45 | r/step=0.0114 | 2.7 ips ETA 12m36
+  iter  2000/4000 [50.0%] | WM wm=37.87 rec=32.95 kl=4.74 rew=0.167 con=0.011 | AC act=-0.006 crit=1.425 pg=-0.006 H=0.76 | img ret=-0.05 val=-0.04 scale=1.91 p5=-0.49 p95=1.42 | r/step=0.0086 | 2.7 ips ETA 12m13
+  >>> EVAL @ iter 2000 : score=2.10  length=208  achievements=3.00 ↓  sample=2.60  (best=3.30 @1500)
+      unlocked (4/22): collect_sapling=100%  wake_up=100%  place_plant=80%  collect_drink=20%
+  Checkpoint saved : dreamer_crafter_jax_v19b-fast-critic-nohealthstop_iter002000.npz
+  iter  2050/4000 [51.2%] | WM wm=30.06 rec=25.02 kl=4.92 rew=0.106 con=0.009 | AC act=-0.001 crit=1.617 pg=-0.001 H=0.74 | img ret=0.14 val=0.13 scale=1.88 p5=-0.49 p95=1.40 | r/step=0.0073 | 2.6 ips ETA 12m16
+  iter  2100/4000 [52.5%] | WM wm=31.09 rec=25.79 kl=5.12 rew=0.169 con=0.017 | AC act=0.002 crit=1.625 pg=0.002 H=0.81 | img ret=0.11 val=0.11 scale=1.89 p5=-0.49 p95=1.40 | r/step=0.0088 | 2.7 ips ETA 11m53
+  iter  2150/4000 [53.8%] | WM wm=31.75 rec=26.39 kl=5.12 rew=0.217 con=0.020 | AC act=0.014 crit=1.976 pg=0.015 H=0.79 | img ret=0.28 val=0.22 scale=1.92 p5=-0.50 p95=1.42 | r/step=0.0193 | 2.7 ips ETA 11m32
+  iter  2200/4000 [55.0%] | WM wm=39.13 rec=33.10 kl=5.88 rew=0.130 con=0.013 | AC act=-0.007 crit=1.440 pg=-0.007 H=0.84 | img ret=0.07 val=0.08 scale=1.91 p5=-0.51 p95=1.40 | r/step=0.0108 | 2.7 ips ETA 11m10
+  iter  2250/4000 [56.2%] | WM wm=31.61 rec=26.05 kl=5.39 rew=0.161 con=0.010 | AC act=0.007 crit=1.647 pg=0.007 H=0.85 | img ret=0.23 val=0.21 scale=1.90 p5=-0.51 p95=1.40 | r/step=0.0065 | 2.7 ips ETA 10m47
+  iter  2300/4000 [57.5%] | WM wm=30.21 rec=24.67 kl=5.38 rew=0.136 con=0.014 | AC act=-0.005 crit=1.486 pg=-0.005 H=0.86 | img ret=-0.02 val=-0.01 scale=1.88 p5=-0.51 p95=1.37 | r/step=0.0134 | 2.7 ips ETA 10m27
+  iter  2350/4000 [58.8%] | WM wm=29.50 rec=24.71 kl=4.59 rew=0.183 con=0.013 | AC act=-0.003 crit=1.573 pg=-0.002 H=1.00 | img ret=-0.01 val=-0.01 scale=1.88 p5=-0.51 p95=1.38 | r/step=0.0041 | 2.7 ips ETA 10m05
+  iter  2400/4000 [60.0%] | WM wm=30.48 rec=25.01 kl=5.35 rew=0.114 con=0.007 | AC act=-0.003 crit=1.599 pg=-0.003 H=0.87 | img ret=0.08 val=0.09 scale=1.91 p5=-0.51 p95=1.39 | r/step=0.0097 | 2.7 ips ETA 9m44
+  iter  2450/4000 [61.2%] | WM wm=29.34 rec=24.08 kl=5.07 rew=0.173 con=0.013 | AC act=-0.004 crit=1.623 pg=-0.004 H=0.89 | img ret=-0.02 val=-0.04 scale=1.92 p5=-0.52 p95=1.40 | r/step=0.0090 | 2.7 ips ETA 9m24
+  iter  2500/4000 [62.5%] | WM wm=32.49 rec=26.37 kl=5.95 rew=0.153 con=0.009 | AC act=0.012 crit=1.789 pg=0.012 H=0.88 | img ret=0.21 val=0.17 scale=1.93 p5=-0.52 p95=1.41 | r/step=0.0164 | 2.8 ips ETA 9m04
+  >>> EVAL @ iter 2500 : score=1.70  length=163  achievements=2.60 ↓  sample=3.00  (best=3.30 @1500)
+      unlocked (3/22): collect_sapling=100%  wake_up=100%  place_plant=60%
+  Checkpoint saved : dreamer_crafter_jax_v19b-fast-critic-nohealthstop_iter002500.npz
+  iter  2550/4000 [63.8%] | WM wm=24.39 rec=18.62 kl=5.55 rew=0.203 con=0.018 | AC act=0.006 crit=1.663 pg=0.006 H=0.83 | img ret=0.19 val=0.16 scale=1.94 p5=-0.53 p95=1.41 | r/step=0.0070 | 2.7 ips ETA 8m58
+  iter  2600/4000 [65.0%] | WM wm=33.79 rec=27.46 kl=6.18 rew=0.140 con=0.013 | AC act=-0.014 crit=1.533 pg=-0.013 H=0.78 | img ret=-0.01 val=0.03 scale=1.93 p5=-0.53 p95=1.40 | r/step=0.0164 | 2.7 ips ETA 8m38
+  iter  2650/4000 [66.2%] | WM wm=33.70 rec=27.20 kl=6.34 rew=0.144 con=0.015 | AC act=0.006 crit=1.590 pg=0.006 H=0.85 | img ret=-0.04 val=-0.05 scale=1.95 p5=-0.53 p95=1.42 | r/step=0.0001 | 2.7 ips ETA 8m16
+  iter  2700/4000 [67.5%] | WM wm=24.12 rec=19.16 kl=4.79 rew=0.147 con=0.013 | AC act=0.009 crit=1.646 pg=0.009 H=0.79 | img ret=0.24 val=0.20 scale=1.95 p5=-0.52 p95=1.42 | r/step=0.0119 | 2.7 ips ETA 7m57
+  iter  2750/4000 [68.8%] | WM wm=25.83 rec=20.85 kl=4.87 rew=0.094 con=0.010 | AC act=-0.006 crit=1.566 pg=-0.006 H=0.88 | img ret=0.27 val=0.27 scale=1.93 p5=-0.52 p95=1.40 | r/step=0.0057 | 2.7 ips ETA 7m36
+  iter  2800/4000 [70.0%] | WM wm=23.08 rec=17.97 kl=4.96 rew=0.130 con=0.009 | AC act=-0.002 crit=1.600 pg=-0.002 H=0.92 | img ret=0.08 val=0.08 scale=1.93 p5=-0.52 p95=1.41 | r/step=0.0158 | 2.7 ips ETA 7m17
+  iter  2850/4000 [71.2%] | WM wm=24.86 rec=19.15 kl=5.60 rew=0.107 con=0.008 | AC act=-0.007 crit=1.601 pg=-0.007 H=0.83 | img ret=-0.04 val=-0.04 scale=1.94 p5=-0.52 p95=1.41 | r/step=0.0080 | 2.8 ips ETA 6m57
+  iter  2900/4000 [72.5%] | WM wm=28.08 rec=21.96 kl=5.95 rew=0.155 con=0.015 | AC act=-0.007 crit=1.559 pg=-0.007 H=0.78 | img ret=0.12 val=0.15 scale=1.92 p5=-0.51 p95=1.41 | r/step=0.0130 | 2.8 ips ETA 6m38
+  iter  2950/4000 [73.8%] | WM wm=31.92 rec=26.26 kl=5.47 rew=0.177 con=0.016 | AC act=-0.005 crit=1.567 pg=-0.005 H=0.75 | img ret=0.02 val=0.03 scale=1.89 p5=-0.51 p95=1.37 | r/step=0.0081 | 2.8 ips ETA 6m18
+  iter  3000/4000 [75.0%] | WM wm=23.47 rec=18.10 kl=5.21 rew=0.147 con=0.014 | AC act=-0.004 crit=1.461 pg=-0.003 H=0.68 | img ret=-0.04 val=-0.03 scale=1.86 p5=-0.52 p95=1.34 | r/step=0.0123 | 2.8 ips ETA 5m59
+  >>> EVAL @ iter 3000 : score=1.40  length=164  achievements=2.30 ↓  sample=2.20  (best=3.30 @1500)
+      unlocked (3/22): collect_sapling=100%  wake_up=80%  place_plant=50%
+  Checkpoint saved : dreamer_crafter_jax_v19b-fast-critic-nohealthstop_iter003000.npz
+  iter  3050/4000 [76.2%] | WM wm=32.09 rec=26.20 kl=5.79 rew=0.096 con=0.009 | AC act=-0.005 crit=1.532 pg=-0.005 H=0.75 | img ret=-0.08 val=-0.09 scale=1.87 p5=-0.51 p95=1.35 | r/step=0.0073 | 2.7 ips ETA 5m48
+  iter  3100/4000 [77.5%] | WM wm=28.37 rec=22.63 kl=5.57 rew=0.148 con=0.015 | AC act=-0.003 crit=1.395 pg=-0.003 H=0.77 | img ret=-0.00 val=-0.00 scale=1.84 p5=-0.51 p95=1.33 | r/step=0.0131 | 2.7 ips ETA 5m28
+  iter  3150/4000 [78.8%] | WM wm=27.83 rec=22.23 kl=5.49 rew=0.103 con=0.007 | AC act=-0.005 crit=1.479 pg=-0.005 H=0.85 | img ret=-0.04 val=-0.04 scale=1.83 p5=-0.52 p95=1.31 | r/step=0.0100 | 2.7 ips ETA 5m09
+  iter  3200/4000 [80.0%] | WM wm=24.47 rec=19.58 kl=4.80 rew=0.086 con=0.009 | AC act=-0.009 crit=1.600 pg=-0.009 H=0.87 | img ret=0.05 val=0.06 scale=1.85 p5=-0.52 p95=1.33 | r/step=0.0089 | 2.8 ips ETA 4m50
+  iter  3250/4000 [81.2%] | WM wm=25.53 rec=19.35 kl=6.02 rew=0.143 con=0.014 | AC act=-0.014 crit=1.593 pg=-0.014 H=0.77 | img ret=0.09 val=0.12 scale=1.85 p5=-0.52 p95=1.33 | r/step=0.0130 | 2.8 ips ETA 4m31
+  iter  3300/4000 [82.5%] | WM wm=22.87 rec=16.74 kl=5.96 rew=0.148 con=0.010 | AC act=-0.003 crit=1.512 pg=-0.003 H=0.79 | img ret=0.05 val=0.04 scale=1.84 p5=-0.53 p95=1.31 | r/step=0.0116 | 2.8 ips ETA 4m13
+  iter  3350/4000 [83.8%] | WM wm=23.66 rec=17.95 kl=5.58 rew=0.127 con=0.012 | AC act=-0.017 crit=1.543 pg=-0.017 H=0.68 | img ret=-0.08 val=-0.03 scale=1.83 p5=-0.53 p95=1.30 | r/step=0.0080 | 2.8 ips ETA 3m54
+  iter  3400/4000 [85.0%] | WM wm=27.38 rec=21.37 kl=5.88 rew=0.125 con=0.009 | AC act=-0.001 crit=1.547 pg=-0.000 H=0.63 | img ret=0.15 val=0.15 scale=1.83 p5=-0.53 p95=1.30 | r/step=0.0146 | 2.8 ips ETA 3m35
+  iter  3450/4000 [86.2%] | WM wm=24.18 rec=18.47 kl=5.60 rew=0.103 con=0.010 | AC act=-0.003 crit=1.586 pg=-0.002 H=0.69 | img ret=0.04 val=0.04 scale=1.85 p5=-0.54 p95=1.31 | r/step=0.0113 | 2.8 ips ETA 3m17
+  iter  3500/4000 [87.5%] | WM wm=32.84 rec=26.40 kl=6.27 rew=0.160 con=0.017 | AC act=0.004 crit=1.463 pg=0.004 H=0.58 | img ret=0.09 val=0.06 scale=1.83 p5=-0.52 p95=1.31 | r/step=0.0068 | 2.8 ips ETA 2m58
+  >>> EVAL @ iter 3500 : score=2.50  length=187  achievements=3.40 ↑  sample=3.60  (best=3.40 @3500)
+      unlocked (4/22): collect_sapling=100%  place_plant=100%  wake_up=100%  collect_wood=40%
+  Checkpoint saved : dreamer_crafter_jax_v19b-fast-critic-nohealthstop_iter003500.npz
+  iter  3550/4000 [88.8%] | WM wm=31.78 rec=25.76 kl=5.86 rew=0.132 con=0.015 | AC act=-0.006 crit=1.419 pg=-0.005 H=0.71 | img ret=-0.00 val=0.00 scale=1.81 p5=-0.52 p95=1.29 | r/step=0.0141 | 2.7 ips ETA 2m43
+  iter  3600/4000 [90.0%] | WM wm=24.62 rec=18.65 kl=5.81 rew=0.138 con=0.013 | AC act=-0.002 crit=1.378 pg=-0.002 H=0.87 | img ret=-0.08 val=-0.08 scale=1.81 p5=-0.51 p95=1.30 | r/step=0.0135 | 2.7 ips ETA 2m25
+  iter  3650/4000 [91.2%] | WM wm=24.92 rec=19.23 kl=5.56 rew=0.126 con=0.006 | AC act=0.008 crit=1.595 pg=0.008 H=0.73 | img ret=0.15 val=0.11 scale=1.80 p5=-0.52 p95=1.28 | r/step=0.0107 | 2.8 ips ETA 2m06
+  iter  3700/4000 [92.5%] | WM wm=24.30 rec=18.31 kl=5.82 rew=0.159 con=0.017 | AC act=0.010 crit=1.617 pg=0.011 H=0.81 | img ret=0.03 val=0.01 scale=1.79 p5=-0.52 p95=1.27 | r/step=0.0237 | 2.8 ips ETA 1m48
+  iter  3750/4000 [93.8%] | WM wm=28.89 rec=23.06 kl=5.72 rew=0.104 con=0.005 | AC act=0.016 crit=1.576 pg=0.016 H=0.82 | img ret=0.23 val=0.19 scale=1.80 p5=-0.52 p95=1.28 | r/step=0.0148 | 2.8 ips ETA 1m30
+  iter  3800/4000 [95.0%] | WM wm=30.95 rec=24.77 kl=6.08 rew=0.092 con=0.006 | AC act=0.001 crit=1.464 pg=0.001 H=0.76 | img ret=0.15 val=0.14 scale=1.80 p5=-0.52 p95=1.28 | r/step=0.0172 | 2.8 ips ETA 1m11
+  iter  3850/4000 [96.2%] | WM wm=27.63 rec=21.88 kl=5.65 rew=0.089 con=0.008 | AC act=-0.001 crit=1.546 pg=-0.001 H=0.83 | img ret=0.11 val=0.10 scale=1.82 p5=-0.53 p95=1.29 | r/step=0.0216 | 2.8 ips ETA 53s
+  iter  3900/4000 [97.5%] | WM wm=23.11 rec=17.84 kl=5.15 rew=0.110 con=0.014 | AC act=0.001 crit=1.613 pg=0.001 H=0.73 | img ret=0.12 val=0.10 scale=1.83 p5=-0.52 p95=1.31 | r/step=0.0038 | 2.8 ips ETA 35s
+  iter  3950/4000 [98.8%] | WM wm=28.37 rec=21.92 kl=6.30 rew=0.136 con=0.011 | AC act=-0.007 crit=1.477 pg=-0.006 H=0.68 | img ret=0.06 val=0.06 scale=1.81 p5=-0.52 p95=1.29 | r/step=0.0145 | 2.8 ips ETA 17s
+  iter  4000/4000 [100.0%] | WM wm=26.45 rec=20.62 kl=5.69 rew=0.129 con=0.008 | AC act=-0.003 crit=1.729 pg=-0.003 H=0.84 | img ret=0.07 val=0.07 scale=1.80 p5=-0.52 p95=1.28 | r/step=0.0143 | 2.8 ips ETA 0s
+  >>> EVAL @ iter 4000 : score=2.50  length=169  achievements=3.40 =  sample=3.80  (best=3.40 @3500)
+      unlocked (5/22): collect_sapling=100%  place_plant=100%  wake_up=100%  collect_wood=20%  eat_cow=20%
+  Checkpoint saved : dreamer_crafter_jax_v19b-fast-critic-nohealthstop_iter004000.npz
+
+Training fini en 1451.1s (24.2min)
+Best EVAL achievements : 3.40 @ iter 3500  (dernier : 3.40)
+
+Final checkpoint : checkpoints/dreamer_crafter_jax_v19b-fast-critic-nohealthstop.npz
+
+============================================================
+DONE
+============================================================
+

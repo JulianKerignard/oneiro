@@ -1,0 +1,47 @@
+{
+  "run_name": "v18_wm_ratio_x4",
+  "iter": 4000,
+  "total_iter": 4000,
+  "last_eval_score": 2.3999999999999995,
+  "last_eval_length": 203.6,
+  "last_eval_achievements": 3.3,
+  "last_eval_achievements_sample": 3.6,
+  "last_eval_achievements_detail": {
+    "collect_sapling": 1.0,
+    "collect_wood": 0.3,
+    "place_plant": 1.0,
+    "wake_up": 1.0
+  },
+  "best_eval_achievements": 4.0,
+  "best_eval_iter": 2000,
+  "history_eval_iter": [
+    500,
+    1000,
+    1500,
+    2000,
+    2500,
+    3000,
+    3500,
+    4000
+  ],
+  "history_eval_achievements": [
+    0.7,
+    2.3,
+    3.5,
+    4.0,
+    2.3,
+    2.0,
+    3.2,
+    3.3
+  ],
+  "history_eval_score": [
+    -0.2,
+    1.3999999999999997,
+    2.5999999999999988,
+    2.8,
+    1.4000000000000001,
+    1.1,
+    2.2999999999999994,
+    2.3999999999999995
+  ]
+}
