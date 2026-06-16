@@ -30,6 +30,14 @@ from pathlib import Path
 REPO_URL = "https://github.com/JulianKerignard/oneiro.git"
 BRANCH = "feat/rtx-3080"  # branche avec le buffer CPU
 
+# Le CLI `kaggle` vit à côté du python courant (venv), pas forcément dans le PATH.
+import shutil
+KAGGLE_BIN = (
+    str(Path(sys.executable).parent / "kaggle")
+    if (Path(sys.executable).parent / "kaggle").exists()
+    else (shutil.which("kaggle") or "kaggle")
+)
+
 
 def kaggle_user():
     user = os.environ.get("KAGGLE_USERNAME")
@@ -108,7 +116,7 @@ def cmd_launch(args):
     print(f"Config   : {args.train_iter} iter, buffer {args.buffer_device} {args.buffer_capacity:,}")
     print(f"Staging  : {work}")
     print("Push (save & run all sur P100)...\n")
-    r = subprocess.run(["kaggle", "kernels", "push", "-p", str(work)], capture_output=True, text=True)
+    r = subprocess.run([KAGGLE_BIN, "kernels", "push", "-p", str(work)], capture_output=True, text=True)
     print(r.stdout + r.stderr)
     if r.returncode == 0:
         print(f"\nSuivi : python {sys.argv[0]} status --run-name {args.run_name}")
@@ -118,7 +126,7 @@ def cmd_launch(args):
 def cmd_status(args):
     user = kaggle_user()
     slug = args.run_name.lower().replace("_", "-")[:50]
-    r = subprocess.run(["kaggle", "kernels", "status", f"{user}/{slug}"], capture_output=True, text=True)
+    r = subprocess.run([KAGGLE_BIN, "kernels", "status", f"{user}/{slug}"], capture_output=True, text=True)
     print(r.stdout + r.stderr)
 
 
@@ -127,7 +135,7 @@ def cmd_pull(args):
     slug = args.run_name.lower().replace("_", "-")[:50]
     out = Path(args.target) / args.run_name
     out.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run(["kaggle", "kernels", "output", f"{user}/{slug}", "-p", str(out)],
+    r = subprocess.run([KAGGLE_BIN, "kernels", "output", f"{user}/{slug}", "-p", str(out)],
                        capture_output=True, text=True)
     print(r.stdout + r.stderr)
     print(f"Output → {out}/")
