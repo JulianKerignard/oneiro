@@ -515,3 +515,106 @@ class ImageReplayBufferJAX:
         rewards_bytes = self.capacity * 4   # float32
         dones_bytes = self.capacity * 4     # float32
         return (obs_bytes + actions_bytes + rewards_bytes + dones_bytes) / 1e6
+
+
+# ============================================================================
+# ImageReplayBufferCPU : buffer RAM-resident (host) — pour GPU à faible VRAM
+# ============================================================================
+#
+# Variante de ImageReplayBufferJAX pour les GPU dont la VRAM ne tient pas le
+# buffer 1M (~12.3GB), typiquement RTX 3080 (10GB). Le buffer vit en RAM
+# système (numpy) ; seul le BATCH samplé (~12.6MB) est transféré sur GPU.
+#
+# Trade-off vs la version GPU-resident :
+#   - libère ~12.3GB de VRAM (le buffer 1M tient alors dans 32GB de RAM)
+#   - re-paie un transfert host->device par sample (la latence qu'on avait
+#     éliminée). Impact mesuré attendu : -20 à -40% d'ips.
+#
+# Même API et même layout per-env (E, P, ...) que la version JAX (fix H_308 :
+# une séquence samplée vit dans UN seul env). Pas de staging : en RAM on écrit
+# directement (le staging GPU servait à batcher les transferts device).
+
+
+class ImageReplayBufferCPU:
+    """Replay buffer per-env stocké en RAM (host). API miroir de ImageReplayBufferJAX."""
+
+    def __init__(self, capacity: int, obs_shape: tuple, n_envs: int = 1, **_):
+        self.n_envs = int(n_envs)
+        self.per_env_cap = capacity // self.n_envs
+        self.capacity = self.per_env_cap * self.n_envs
+        self.obs_shape = tuple(obs_shape)
+
+        E, P = self.n_envs, self.per_env_cap
+        # Buffers RAM (numpy). obs en uint8 (×4 moins que float32).
+        self.obs = np.zeros((E, P, *self.obs_shape), dtype=np.uint8)
+        self.actions = np.zeros((E, P), dtype=np.int32)
+        self.rewards = np.zeros((E, P), dtype=np.float32)
+        self.dones = np.zeros((E, P), dtype=np.float32)
+
+        self.size_env = np.zeros(E, dtype=np.int64)
+        self.ptr_env = np.zeros(E, dtype=np.int64)
+
+    def _to_uint8(self, obs):
+        if obs.dtype == np.uint8:
+            return obs
+        return (np.clip(obs, 0.0, 1.0) * 255.0).astype(np.uint8)
+
+    def add(self, obs, action, reward, next_obs, done, env_id: int = 0):
+        """Écrit une transition de l'env `env_id` directement en RAM (FIFO per-env)."""
+        e = int(env_id)
+        p = int(self.ptr_env[e])
+        self.obs[e, p] = self._to_uint8(obs)
+        self.actions[e, p] = action
+        self.rewards[e, p] = reward
+        self.dones[e, p] = float(bool(done))
+        self.ptr_env[e] = (p + 1) % self.per_env_cap
+        self.size_env[e] = min(self.size_env[e] + 1, self.per_env_cap)
+
+    def flush(self):
+        """No-op (pas de staging GPU en mode CPU) — présent pour la compat API."""
+        pass
+
+    def sample_sequences(self, key, batch_size: int, seq_len: int) -> dict:
+        """
+        Sample batch_size séquences mono-env, gather en RAM puis transfert GPU.
+
+        Le sampling des indices utilise la PRNGKey jax (reproductible, aligné
+        sur la version GPU) ; le gather est numpy, et seul le batch est
+        device_put (uint8 → cast float32 sur GPU).
+        """
+        min_size = int(self.size_env.min())
+        if min_size < seq_len:
+            raise ValueError(
+                f"Buffer trop petit pour seq : min(size_env)={min_size} < {seq_len}")
+
+        max_start = min_size - seq_len
+        k_env, k_start = jax.random.split(key)
+        env_idx = np.asarray(jax.random.randint(k_env, (batch_size,), 0, self.n_envs))
+        starts = np.asarray(jax.random.randint(k_start, (batch_size,), 0, max_start + 1))
+
+        # Gather numpy (B, T) dans l'env choisi
+        t_idx = starts[:, None] + np.arange(seq_len)[None, :]   # (B, T)
+        e_idx = env_idx[:, None]                                # (B, 1)
+        obs_u8 = self.obs[e_idx, t_idx]                         # (B, T, C, H, W) uint8
+        actions = self.actions[e_idx, t_idx]
+        rewards = self.rewards[e_idx, t_idx]
+        dones = self.dones[e_idx, t_idx]
+
+        # Transfert host->device : uint8 (4× plus léger que float32), cast sur GPU
+        return {
+            "obs": jnp.asarray(obs_u8, dtype=jnp.float32) / 255.0,
+            "actions": jnp.asarray(actions),
+            "rewards": jnp.asarray(rewards),
+            "dones": jnp.asarray(dones),
+        }
+
+    def __len__(self):
+        return int(self.size_env.sum())
+
+    def is_full(self):
+        return bool((self.size_env == self.per_env_cap).all())
+
+    def memory_usage_mb(self):
+        """RAM (host) utilisée par les buffers."""
+        obs_bytes = self.capacity * int(np.prod(self.obs_shape))  # uint8
+        return (obs_bytes + self.capacity * 12) / 1e6  # +int32+2×float32

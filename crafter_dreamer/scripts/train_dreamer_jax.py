@@ -49,7 +49,7 @@ import optax
 import distrax
 
 from crafter_dreamer.env import CrafterEnv, ACHIEVEMENTS
-from src_jax.buffer import ImageReplayBufferJAX
+from src_jax.buffer import ImageReplayBufferJAX, ImageReplayBufferCPU
 from src_jax.model import (
     CNNEncoder, CNNDecoder, RSSM, RewardHead, ContinueHead,
     Actor, Critic, RNDModule,
@@ -1280,7 +1280,11 @@ def parse_args():
                    help="Active le profiling fin (breakdown collect/WM/AC/transfer).")
     p.add_argument("--buffer_capacity", type=int, default=BUFFER_CAPACITY,
                    help=f"Taille du replay buffer (défaut {BUFFER_CAPACITY} = paper ; "
-                        "~12.3GB VRAM à 1M. Réduire pour smoketests locaux).")
+                        "~12.3GB à 1M. Réduire pour smoketests locaux).")
+    p.add_argument("--buffer_device", choices=["gpu", "cpu"], default="gpu",
+                   help="gpu : buffer en VRAM (rapide, défaut, besoin ~12.3GB VRAM à 1M). "
+                        "cpu : buffer en RAM host, transfert du batch au sample "
+                        "(pour GPU à faible VRAM type RTX 3080 ; -20 à -40%% ips).")
     p.add_argument("--resume_from", type=str, default=None,
                    help="Checkpoint .npz à charger pour reprendre le training "
                         "(reprend à l'iter du .meta.json). Le buffer repart du "
@@ -1442,9 +1446,12 @@ def main():
     # Buffer per-env : les séquences RSSM doivent être des trajectoires d'UN
     # seul env (fix bug interleaving : avant, chaque séquence de 64 steps
     # changeait d'env à chaque step → dynamique fictive apprise par le prior).
-    buffer = ImageReplayBufferJAX(
+    BufferClass = ImageReplayBufferJAX if args.buffer_device == "gpu" else ImageReplayBufferCPU
+    buffer = BufferClass(
         capacity=args.buffer_capacity, obs_shape=obs_shape, n_envs=n_envs,
     )
+    print(f"Buffer      : {args.buffer_device.upper()} "
+          f"({args.buffer_capacity:,} cap, {buffer.memory_usage_mb():.0f} MB)")
 
     # ----------- Setup models
     rngs = nnx.Rngs(seed)
