@@ -78,10 +78,14 @@ def build_notebook(args) -> dict:
     # Note : %cd oneiro (cellule 1) fixe le cwd du notebook → les cellules
     # suivantes y sont déjà, ne PAS refaire cd. Checkpoints/summaries dans
     # /kaggle/working (récupérés en output du kernel par `pull`).
+    # /!\ NE PAS importer jax dans le kernel notebook avant le training :
+    # sur TPU le device est EXCLUSIF (vfio, 1 process). Si le notebook fait
+    # `import jax`, il réserve le TPU et le sous-process training (`!python`)
+    # ne peut plus l'ouvrir → "Device busy". Le training affiche lui-même le
+    # backend dans son header, donc pas de cellule de vérif séparée.
     cells = [
         f"!rm -rf oneiro && git clone -b {BRANCH} {REPO_URL}",
         f'%cd oneiro\n!pip install -q -r requirements.txt && pip install -q -U {jax_pkg}',
-        "import jax; print('JAX backend :', jax.default_backend(), jax.devices())",
         f"!WORLDMODEL_OUTPUT_DIR=/kaggle/working {train_cmd}",
     ]
     return {
