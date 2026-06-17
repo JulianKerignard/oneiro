@@ -28,7 +28,7 @@ import tempfile
 from pathlib import Path
 
 REPO_URL = "https://github.com/JulianKerignard/oneiro.git"
-BRANCH = "feat/rtx-3080"  # branche avec le buffer CPU
+BRANCH = "feat/arch-size12m"  # buffer CPU + archi rééquilibrée 14.4M (deter-dominant)
 
 # Le CLI `kaggle` vit à côté du python courant (venv), pas forcément dans le PATH.
 import shutil
