@@ -28,7 +28,7 @@ import tempfile
 from pathlib import Path
 
 REPO_URL = "https://github.com/JulianKerignard/oneiro.git"
-BRANCH = "feat/arch-size12m"  # buffer CPU + archi rééquilibrée 14.4M (deter-dominant)
+BRANCH = "feat/tpu"  # archi rééquilibrée + buffer CPU + support TPU (--tpu)
 
 # Le CLI `kaggle` vit à côté du python courant (venv), pas forcément dans le PATH.
 import shutil
@@ -70,12 +70,17 @@ def build_notebook(args) -> dict:
         flags.append(args.extra_args)
     train_cmd = "python -u crafter_dreamer/scripts/train_dreamer_jax.py " + " ".join(flags)
 
+    # JAX backend selon l'accélérateur : cuda12 pour GPU, tpu pour TPU v5e-8.
+    # Sur TPU, le code JAX tourne tel quel sur 1 core (single-device, pas de
+    # pmap) ; le buffer CPU est idéal (host TPU-VM a beaucoup de RAM).
+    # /!\ Risque connu : matching jax[tpu] x.y.z <-> libtpu de l'image Kaggle.
+    jax_pkg = '"jax[tpu]==0.10.1" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html' if args.tpu else '"jax[cuda12]==0.10.1"'
     # Note : %cd oneiro (cellule 1) fixe le cwd du notebook → les cellules
     # suivantes y sont déjà, ne PAS refaire cd. Checkpoints/summaries dans
     # /kaggle/working (récupérés en output du kernel par `pull`).
     cells = [
         f"!rm -rf oneiro && git clone -b {BRANCH} {REPO_URL}",
-        '%cd oneiro\n!pip install -q -r requirements.txt && pip install -q -U "jax[cuda12]==0.10.1"',
+        f'%cd oneiro\n!pip install -q -r requirements.txt && pip install -q -U {jax_pkg}',
         "import jax; print('JAX backend :', jax.default_backend(), jax.devices())",
         f"!WORLDMODEL_OUTPUT_DIR=/kaggle/working {train_cmd}",
     ]
@@ -90,20 +95,26 @@ def build_notebook(args) -> dict:
     }
 
 
-def kernel_metadata(user, slug) -> dict:
-    return {
+def kernel_metadata(user, slug, tpu=False) -> dict:
+    meta = {
         "id": f"{user}/{slug}",
         "title": slug,
         "code_file": "notebook.ipynb",
         "language": "python",
         "kernel_type": "notebook",
         "is_private": True,
-        "enable_gpu": True,         # P100 par défaut (sinon régler l'accélérateur dans l'UI)
         "enable_internet": True,    # requis pour git clone + pip
         "dataset_sources": [],
         "competition_sources": [],
         "kernel_sources": [],
     }
+    if tpu:
+        # /!\ champ accélérateur TPU Kaggle à confirmer au 1er push (v5e-8).
+        # Sinon : régler l'accélérateur = TPU VM v5e-8 dans l'UI du notebook.
+        meta["enable_tpu"] = True
+    else:
+        meta["enable_gpu"] = True   # P100 (ou régler dans l'UI)
+    return meta
 
 
 def cmd_launch(args):
@@ -111,11 +122,12 @@ def cmd_launch(args):
     slug = args.run_name.lower().replace("_", "-")[:50]
     work = Path(tempfile.mkdtemp(prefix="kaggle_oneiro_"))
     (work / "notebook.ipynb").write_text(json.dumps(build_notebook(args)))
-    (work / "kernel-metadata.json").write_text(json.dumps(kernel_metadata(user, slug), indent=2))
+    (work / "kernel-metadata.json").write_text(json.dumps(kernel_metadata(user, slug, args.tpu), indent=2))
+    accel = "TPU v5e-8" if args.tpu else "GPU P100"
     print(f"Kernel   : {user}/{slug}")
     print(f"Config   : {args.train_iter} iter, buffer {args.buffer_device} {args.buffer_capacity:,}")
     print(f"Staging  : {work}")
-    print("Push (save & run all sur P100)...\n")
+    print(f"Push (save & run all sur {accel})...\n")
     r = subprocess.run([KAGGLE_BIN, "kernels", "push", "-p", str(work)], capture_output=True, text=True)
     print(r.stdout + r.stderr)
     if r.returncode == 0:
@@ -152,6 +164,8 @@ def main():
     pl.add_argument("--wm-train-per-iter", type=int, default=4)
     pl.add_argument("--n-envs", type=int, default=16)
     pl.add_argument("--batch-size", type=int, default=16)
+    pl.add_argument("--tpu", action="store_true", default=False,
+                    help="Cible TPU v5e-8 (jax[tpu], 1 core) au lieu de GPU P100.")
     pl.add_argument("--buffer-device", choices=["gpu", "cpu"], default="cpu")
     pl.add_argument("--buffer-capacity", type=int, default=1_000_000)
     pl.add_argument("--no-use-rnd", action="store_true", default=True)
