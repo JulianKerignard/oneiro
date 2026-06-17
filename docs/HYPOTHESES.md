@@ -374,17 +374,29 @@ Chaque hypothèse :
 
 ---
 
-### H_301 — Notre archi RSSM est trop déséquilibrée
+### H_301 — Notre archi RSSM est trop déséquilibrée (deter trop petit)
 
-**Énoncé** : Notre `H_DIM=384` (RSSM deter) est trop petit vs paper `size12m=2048`. Notre `HIDDEN_DIM=768` (mlp) est trop grand vs paper 256. Architecture asymétrique non standard.
+**Énoncé** : `H_DIM=384` (deter) trop petit vs proportions officielles, `HIDDEN_DIM=768` (mlp) trop grand. Le deter étant la mémoire récurrente, un deter famélique empêche de modéliser les chaînes longues (wood→table→pickaxe) → plafond couche 1-2.
 
-**Origine** : Audit Phase 2-DEEP (table comparaison hyperparams)
+**Origine** : Audit + comparaison config officielle (size12m : deter 2048, units 256, ratio 8:1 vs notre 0.5:1).
 
-**Run de test** : aucun
+**Run de test** : v24 (deter 384→1280, hidden 768→256, z 32×16, cnn 16, embed 512 ; ~14.4M, MÊME budget réalloué). Kaggle P100, 20k iter, buffer 1M, gratuit.
 
-**Statut** : ouvert
+**Statut** : ✓ VALIDÉE — l'archi rééquilibrée OUVRE la couche 3
 
-**Test possible** : refaire l'archi pour matcher size12m officiel : `deter=2048, hidden=256, classes=16, depth=16, units=256`. Mais c'est un gros refactor.
+**Résultat (lu dans les success rates TRAINING, PAS l'EVAL argmax)** :
+| achievement | v23 (deter 384) | v24 (deter 1280) |
+|---|---|---|
+| place_table | 3.0% | **5.7%** |
+| make_wood_pickaxe | **0.0%** | **0.8%** (~28 fois) |
+| make_wood_sword | **0.0%** | **0.7%** |
+| collect_stone | **0.0%** | **0.1%** |
+
+v24 a fabriqué pickaxe/sword en bois et collecté de la pierre — **couche 3 atteinte**, ce que deter 384 ne faisait JAMAIS. Cohérent à 100% avec "il oubliait". PREUVE qu'un 14.4M PEUT atteindre la couche 3 → ce n'est PAS une limite de capacité.
+
+**Nuances** : best EVAL argmax 3.70 = identique à v23 (les rares succès couche 3 n'apparaissent pas en argmax déterministe) ; crafter_score pic 2.23% (vs 1.97% v23) puis décline à 2.11% en fin (oscillation H_311 toujours là). Taux couche 3 très faible (0.8%) → non consolidé.
+
+**Suite** : la couche 3 est OUVERTE mais pas CONSOLIDÉE. → H_308 (train_ratio 512) doit la consolider : on a ~28 succès rares dans le buffer, rejoués 128× (vs paper 512×) → 4× plus d'apprentissage les stabiliserait. Test : train_ratio 512 (wm_train_per_iter 16) sur TPU single-core.
 
 ---
 
