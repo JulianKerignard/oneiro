@@ -46,7 +46,6 @@ import jax.numpy as jnp
 import jax.random as jr
 from flax import nnx
 import optax
-import distrax
 
 from crafter_dreamer.env import CrafterEnv, ACHIEVEMENTS
 from src_jax.buffer import ImageReplayBufferJAX, ImageReplayBufferCPU

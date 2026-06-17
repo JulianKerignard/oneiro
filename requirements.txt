@@ -3,7 +3,6 @@
 jax==0.10.1
 flax==0.12.7
 optax==0.2.8
-distrax==0.1.8
 chex==0.1.91
 orbax-checkpoint==0.12.0
 

@@ -41,3 +41,6 @@ videos/*_hd.gif
 # OS
 .DS_Store
 Thumbs.db
+
+# Kaggle run outputs (gros checkpoints, regénérables)
+kaggle_outputs/

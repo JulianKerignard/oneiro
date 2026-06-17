@@ -31,7 +31,7 @@ Notes JAX :
 import jax
 import jax.numpy as jnp
 from flax import nnx
-import distrax
+from .distributions import Categorical
 
 
 # ============================================================== Custom GRU Cell
@@ -121,8 +121,8 @@ def sample_categorical_straight_through(
     # Mix avec uniforme pour éviter les distributions dégénérées
     probs = (1.0 - uniform_mix) * probs + uniform_mix / num_classes
 
-    # Sample catégorique via distrax (opère sur la dernière dim)
-    sample_idx = distrax.Categorical(probs=probs).sample(seed=key)
+    # Sample catégorique (Categorical maison, jax pur) (opère sur la dernière dim)
+    sample_idx = Categorical(probs=probs).sample(seed=key)
     sample_onehot = jax.nn.one_hot(sample_idx, num_classes, dtype=probs.dtype)
 
     # Straight-through : forward = sample_onehot, backward = probs (différentiable)
@@ -480,15 +480,15 @@ class RSSM(nnx.Module):
         Returns:
             loss : scalaire
         """
-        # distrax.Categorical opère sur la dernière dim (z_classes)
+        # Categorical opère sur la dernière dim (z_classes)
         # Versions avec stop_gradient sur les logits
         post_logits_sg = jax.lax.stop_gradient(post_logits)
         prior_logits_sg = jax.lax.stop_gradient(prior_logits)
 
-        post_dist = distrax.Categorical(logits=post_logits)
-        prior_dist = distrax.Categorical(logits=prior_logits)
-        post_dist_sg = distrax.Categorical(logits=post_logits_sg)
-        prior_dist_sg = distrax.Categorical(logits=prior_logits_sg)
+        post_dist = Categorical(logits=post_logits)
+        prior_dist = Categorical(logits=prior_logits)
+        post_dist_sg = Categorical(logits=post_logits_sg)
+        prior_dist_sg = Categorical(logits=prior_logits_sg)
 
         # KL divergence : shape (B, T, z_cat) — la dim z_classes est consommée
         kl_prior_learn = post_dist_sg.kl_divergence(prior_dist)

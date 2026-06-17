@@ -7,7 +7,7 @@ et retourne une distribution Categorical sur les actions.
 Notes JAX :
     - Pas de PRNG key stockée dans le module (stateless).
     - La key est passée explicitement à sample().
-    - distrax.Categorical gère le sampling, log_prob et l'entropie.
+    - Categorical gère le sampling, log_prob et l'entropie.
     - mask (action invalide) : jnp.where(mask, logits, -1e9)
 
 Training : policy gradient dans l'imagination du WM.
@@ -17,7 +17,7 @@ Training : policy gradient dans l'imagination du WM.
 import jax
 import jax.numpy as jnp
 from flax import nnx
-import distrax
+from .distributions import Categorical
 
 
 class Actor(nnx.Module):
@@ -57,7 +57,7 @@ class Actor(nnx.Module):
         state: jax.Array,
         mask: jax.Array | None = None,
         unimix: float = 0.01,
-    ) -> distrax.Categorical:
+    ) -> Categorical:
         """
         Retourne la distribution Categorical sur les actions.
 
@@ -71,7 +71,7 @@ class Actor(nnx.Module):
             unimix : proportion d'uniforme à mélanger (0.01 par défaut, paper DreamerV3).
 
         Returns:
-            distrax.Categorical distribution
+            Categorical distribution
         """
         logits = self(state)
         if mask is not None:
@@ -82,7 +82,7 @@ class Actor(nnx.Module):
         uniform = jnp.ones_like(probs) / probs.shape[-1]
         probs = (1.0 - unimix) * probs + unimix * uniform
 
-        return distrax.Categorical(probs=probs)
+        return Categorical(probs=probs)
 
     def sample(
         self,
