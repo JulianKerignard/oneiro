@@ -135,12 +135,21 @@ RETURN_PERCENTILE_HIGH = 0.95
 # Critic EMA target network
 CRITIC_TARGET_TAU = 0.98
 
-# Architecture (Palier 2)
-EMBED_DIM = 192
-H_DIM = 384
-Z_CATEGORIES = 24
-Z_CLASSES = 24
-HIDDEN_DIM = 768
+# Architecture — RÉALIGNÉE sur les proportions officielles DreamerV3 size12m.
+# AVANT (déséquilibré, plafond couche 1-2) : EMBED 192, H_DIM 384, Z 24×24, HIDDEN 768, cnn 32.
+# Problème : deter (mémoire GRU) 5× trop PETIT (384 vs 2048 officiel) → le WM
+# "oublie" → incapable de modéliser les chaînes longues (wood→table→pickaxe).
+# Et MLP 3× trop GROS (768 vs 256) → params gaspillés loin de la mémoire.
+# APRÈS : l'essentiel des params dans le deter récurrent (planification).
+EMBED_DIM = 512          # sortie CNN (était 192)
+H_DIM = 1280             # deter GRU — LA correction mémoire : ×3.3 (était 384)
+Z_CATEGORIES = 32        # 32 variables catégorielles (proportions officielles)
+Z_CLASSES = 16           # × 16 classes (était 24×24)
+HIDDEN_DIM = 256         # MLP units : ÷3 (était 768) — dégonfle les MLP gaspilleurs
+CNN_DEPTH = 16           # base channels CNN (était 32)
+# Budget ~14.4M (≈ les 15M d'avant) mais RÉALLOUÉ : ratio deter:hidden passe de
+# 0.5:1 (mémoire famélique) à 5:1 (mémoire dominante, 49% des params dans le
+# RSSM). Même taille, mais l'agent n'"oublie" plus → vise la couche 3+.
 
 # KL loss DreamerV3
 FREE_BITS = 1.0
@@ -1455,13 +1464,13 @@ def main():
 
     # ----------- Setup models
     rngs = nnx.Rngs(seed)
-    encoder = CNNEncoder(in_channels=3, embed_dim=EMBED_DIM, base_channels=32, rngs=rngs)
+    encoder = CNNEncoder(in_channels=3, embed_dim=EMBED_DIM, base_channels=CNN_DEPTH, rngs=rngs)
     rssm = RSSM(
         embed_dim=EMBED_DIM, action_dim=action_dim,
         h_dim=H_DIM, z_categories=Z_CATEGORIES, z_classes=Z_CLASSES,
         hidden_dim=HIDDEN_DIM, rngs=rngs,
     )
-    decoder = CNNDecoder(state_dim=rssm.state_dim, out_channels=3, base_channels=32, rngs=rngs)
+    decoder = CNNDecoder(state_dim=rssm.state_dim, out_channels=3, base_channels=CNN_DEPTH, rngs=rngs)
     reward_head = RewardHead(state_dim=rssm.state_dim, hidden_dim=HIDDEN_DIM, rngs=rngs)
     continue_head = ContinueHead(state_dim=rssm.state_dim, hidden_dim=HIDDEN_DIM, rngs=rngs)
     actor = Actor(state_dim=rssm.state_dim, hidden_dim=HIDDEN_DIM, action_dim=action_dim, rngs=rngs)
