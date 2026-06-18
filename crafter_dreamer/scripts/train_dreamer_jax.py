@@ -84,8 +84,8 @@ SEQ_LEN = 64                 # paper utilise seq_len=64
 IMAGINATION_HORIZON = 16
 
 # Optimization (DreamerV3 canonique)
-LR_WM = 1e-4   # aligné officiel paper (4e-5 mais on garde un peu plus pour converger plus vite)
-LR_AC = 1e-4
+LR_WM = 4e-5   # valeur paper officielle — co-tunée avec train_ratio 512 (cf. v28 : 1e-4 cassait à tr512)
+LR_AC = 4e-5
 GRAD_CLIP = 1.0   # clipping strict (officiel utilise AGC, on garde global_norm mais beaucoup plus serré)
 
 # RL params
