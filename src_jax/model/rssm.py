@@ -63,8 +63,13 @@ class CustomGRUCell(nnx.Module):
     def __init__(self, input_size: int, hidden_size: int, *, rngs: nnx.Rngs):
         self.input_size = input_size
         self.hidden_size = hidden_size
-        self.dense_i = nnx.Linear(input_size, 3 * hidden_size, use_bias=True, rngs=rngs)
-        self.dense_h = nnx.Linear(hidden_size, 3 * hidden_size, use_bias=True, rngs=rngs)
+        # use_bias=False : le LayerNorm qui suit porte le scale/bias (aligné symoon11/DreamerV3).
+        self.dense_i = nnx.Linear(input_size, 3 * hidden_size, use_bias=False, rngs=rngs)
+        self.dense_h = nnx.Linear(hidden_size, 3 * hidden_size, use_bias=False, rngs=rngs)
+        # LayerNorm DANS la cellule récurrente : stabilise l'amplitude de h sous
+        # replay intensif (sans ça, h dérive → gates sigmoid/tanh saturent → WM diverge).
+        self.norm_i = nnx.LayerNorm(3 * hidden_size, rngs=rngs)
+        self.norm_h = nnx.LayerNorm(3 * hidden_size, rngs=rngs)
 
     def __call__(self, h_prev: jax.Array, x: jax.Array) -> tuple[jax.Array, jax.Array]:
         """
@@ -75,8 +80,8 @@ class CustomGRUCell(nnx.Module):
         Returns:
             (new_h, new_h) tuple — convention nnx.GRUCell : (carry, output) identiques.
         """
-        gates_i = self.dense_i(x)        # (B, 3*hidden)
-        gates_h = self.dense_h(h_prev)   # (B, 3*hidden)
+        gates_i = self.norm_i(self.dense_i(x))        # (B, 3*hidden) + LayerNorm
+        gates_h = self.norm_h(self.dense_h(h_prev))   # (B, 3*hidden) + LayerNorm
 
         # Split en 3 dans l'ordre PyTorch : (r, z, n)
         r_i, z_i, n_i = jnp.split(gates_i, 3, axis=-1)
@@ -482,13 +487,22 @@ class RSSM(nnx.Module):
         """
         # Categorical opère sur la dernière dim (z_classes)
         # Versions avec stop_gradient sur les logits
-        post_logits_sg = jax.lax.stop_gradient(post_logits)
-        prior_logits_sg = jax.lax.stop_gradient(prior_logits)
+        # Unimix 1% (anti-collapse DreamerV3) appliqué AUSSI dans la KL (pas
+        # seulement au sampling) : borne log p_other → évite que le prior produise
+        # des logits extrêmes → KL qui explose → gradients instables sous replay.
+        # Aligné symoon11 (get_dist() unimixé utilisé au sampling ET dans la KL).
+        def _unimix(logits, mix=0.01):
+            p = jax.nn.softmax(logits, axis=-1)
+            return (1.0 - mix) * p + mix / p.shape[-1]
+        post_probs = _unimix(post_logits)
+        prior_probs = _unimix(prior_logits)
+        post_probs_sg = jax.lax.stop_gradient(post_probs)
+        prior_probs_sg = jax.lax.stop_gradient(prior_probs)
 
-        post_dist = Categorical(logits=post_logits)
-        prior_dist = Categorical(logits=prior_logits)
-        post_dist_sg = Categorical(logits=post_logits_sg)
-        prior_dist_sg = Categorical(logits=prior_logits_sg)
+        post_dist = Categorical(probs=post_probs)
+        prior_dist = Categorical(probs=prior_probs)
+        post_dist_sg = Categorical(probs=post_probs_sg)
+        prior_dist_sg = Categorical(probs=prior_probs_sg)
 
         # KL divergence : shape (B, T, z_cat) — la dim z_classes est consommée
         kl_prior_learn = post_dist_sg.kl_divergence(prior_dist)

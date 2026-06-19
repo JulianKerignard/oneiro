@@ -84,9 +84,11 @@ SEQ_LEN = 64                 # paper utilise seq_len=64
 IMAGINATION_HORIZON = 16
 
 # Optimization (DreamerV3 canonique)
-LR_WM = 4e-5   # valeur paper officielle — co-tunée avec train_ratio 512 (cf. v28 : 1e-4 cassait à tr512)
-LR_AC = 4e-5
-GRAD_CLIP = 1.0   # clipping strict (officiel utilise AGC, on garde global_norm mais beaucoup plus serré)
+LR_WM = 1e-4   # aligné symoon11 (réf 17.65) : WM rapide
+LR_AC = 3e-5   # aligné symoon11 : AC ~3x plus lent que le WM (le WM doit être "en avance")
+GRAD_CLIP_WM = 1000.0  # aligné symoon11 : clip quasi inactif (1.0 écrasait les gradients recon sommés sur 64x64x3 px)
+GRAD_CLIP_AC = 100.0   # aligné symoon11
+GRAD_CLIP = GRAD_CLIP_AC  # défaut générique (optim RND si activé)
 
 # RL params
 # GAMMA 0.997 (paper) : horizon de valeur ~330 steps (vs ~100 à 0.99).
@@ -1532,18 +1534,18 @@ def main():
     # ----------- Optimizers : on group les modules en tuples pour partager un opt
     # WM bundle : encoder + rssm + decoder + reward_head + continue_head
     wm_bundle = (encoder, rssm, decoder, reward_head, continue_head)
-    tx_wm = optax.chain(
-        optax.clip_by_global_norm(GRAD_CLIP),
+    tx_wm = optax.apply_if_finite(optax.chain(
+        optax.clip_by_global_norm(GRAD_CLIP_WM),
         optax.adam(LR_WM),
-    )
+    ), max_consecutive_errors=10)
     opt_wm = nnx.Optimizer(wm_bundle, tx_wm, wrt=nnx.Param)
 
     # AC bundle : actor + critic
     ac_bundle = (actor, critic)
-    tx_ac = optax.chain(
-        optax.clip_by_global_norm(GRAD_CLIP),
+    tx_ac = optax.apply_if_finite(optax.chain(
+        optax.clip_by_global_norm(GRAD_CLIP_AC),
         optax.adam(LR_AC),
-    )
+    ), max_consecutive_errors=10)
     opt_ac = nnx.Optimizer(ac_bundle, tx_ac, wrt=nnx.Param)
 
     # Return normalization : Percentile-EMA P5/P95 (DreamerV3 canonique)
