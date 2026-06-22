@@ -71,8 +71,9 @@ def build_notebook(args) -> dict:
     train_cmd = "python -u crafter_dreamer/scripts/train_dreamer_jax.py " + " ".join(flags)
 
     # JAX backend selon l'accélérateur : cuda12 pour GPU, tpu pour TPU v5e-8.
-    # Sur TPU, le code JAX tourne tel quel sur 1 core (single-device, pas de
-    # pmap) ; le buffer CPU est idéal (host TPU-VM a beaucoup de RAM).
+    # Sur TPU v5e-8, JAX voit les 8 cores ; le training s'auto-active en
+    # data-parallel (mesh GSPMD, batch shardé sur 'data', state répliqué) —
+    # batch_size doit être divisible par 8 (16 OK). buffer CPU idéal (host RAM).
     # /!\ Risque connu : matching jax[tpu] x.y.z <-> libtpu de l'image Kaggle.
     jax_pkg = '"jax[tpu]==0.10.1" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html' if args.tpu else '"jax[cuda12]==0.10.1"'
     # Note : %cd oneiro (cellule 1) fixe le cwd du notebook → les cellules

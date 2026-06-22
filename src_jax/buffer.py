@@ -358,12 +358,17 @@ class ImageReplayBufferJAX:
     """
 
     def __init__(self, capacity: int, obs_shape: tuple, n_envs: int = 1,
-                 staging_capacity: int = 256):
+                 staging_capacity: int = 256, data_sharding=None):
         self.n_envs = int(n_envs)
         # capacity = budget TOTAL, réparti également entre les envs
         self.per_env_cap = capacity // self.n_envs
         self.capacity = self.per_env_cap * self.n_envs
         self.obs_shape = tuple(obs_shape)  # ex: (3, 64, 64)
+
+        # Data-parallel : sharding du batch samplé sur l'axe `data` (dim 0 = B).
+        # None → comportement identique à avant (placement par défaut). Réglé
+        # depuis main() une fois le mesh créé (1 device → sharding trivial).
+        self.data_sharding = data_sharding
 
         E, P = self.n_envs, self.per_env_cap
         # Buffers GPU layout per-env (uint8 pour obs, float32 pour le reste)
@@ -494,10 +499,16 @@ class ImageReplayBufferJAX:
         starts = jax.random.randint(k_start, (batch_size,), 0, max_start + 1)
 
         # Gather + cast/normalize en un seul kernel jit
-        return _gather_sequences_impl(
+        batch = _gather_sequences_impl(
             self.obs, self.actions, self.rewards, self.dones,
             env_idx, starts, seq_len,
         )
+        # Data-parallel : shard la dim 0 (B) sur l'axe `data`. Sur 1 device le
+        # sharding est trivial (no-op fonctionnel). Sur N devices, XLA propage
+        # le split dans les train steps jit (GSPMD).
+        if self.data_sharding is not None:
+            batch = jax.device_put(batch, self.data_sharding)
+        return batch
 
     # --------------------------------------------------------------- info
 
@@ -538,11 +549,17 @@ class ImageReplayBufferJAX:
 class ImageReplayBufferCPU:
     """Replay buffer per-env stocké en RAM (host). API miroir de ImageReplayBufferJAX."""
 
-    def __init__(self, capacity: int, obs_shape: tuple, n_envs: int = 1, **_):
+    def __init__(self, capacity: int, obs_shape: tuple, n_envs: int = 1,
+                 data_sharding=None, **_):
         self.n_envs = int(n_envs)
         self.per_env_cap = capacity // self.n_envs
         self.capacity = self.per_env_cap * self.n_envs
         self.obs_shape = tuple(obs_shape)
+
+        # Data-parallel : sharding du batch samplé sur l'axe `data` (dim 0 = B).
+        # C'est le chemin réel sur TPU (--buffer_device cpu). None → placement
+        # par défaut (identique à avant le data-parallel).
+        self.data_sharding = data_sharding
 
         E, P = self.n_envs, self.per_env_cap
         # Buffers RAM (numpy). obs en uint8 (×4 moins que float32).
@@ -601,12 +618,18 @@ class ImageReplayBufferCPU:
         dones = self.dones[e_idx, t_idx]
 
         # Transfert host->device : uint8 (4× plus léger que float32), cast sur GPU
-        return {
+        batch = {
             "obs": jnp.asarray(obs_u8, dtype=jnp.float32) / 255.0,
             "actions": jnp.asarray(actions),
             "rewards": jnp.asarray(rewards),
             "dones": jnp.asarray(dones),
         }
+        # Data-parallel : shard la dim 0 (B) sur l'axe `data`. Sur 1 device le
+        # sharding est trivial (no-op fonctionnel). Sur N devices, le batch est
+        # splitté en N morceaux et XLA propage le DP dans les train steps jit.
+        if self.data_sharding is not None:
+            batch = jax.device_put(batch, self.data_sharding)
+        return batch
 
     def __len__(self):
         return int(self.size_env.sum())

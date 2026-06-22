@@ -28,16 +28,26 @@ class Actor(nnx.Module):
         state_dim: int = 384,
         hidden_dim: int = 256,
         action_dim: int = 41,
+        num_layers: int = 2,
         *,
         rngs: nnx.Rngs,
     ):
         self.state_dim = state_dim
         self.action_dim = action_dim
+        self.num_layers = num_layers
 
-        self.linear1 = nnx.Linear(state_dim, hidden_dim, rngs=rngs)
-        self.norm1 = nnx.LayerNorm(hidden_dim, epsilon=1e-5, rngs=rngs)
-        self.linear2 = nnx.Linear(hidden_dim, hidden_dim, rngs=rngs)
-        self.norm2 = nnx.LayerNorm(hidden_dim, epsilon=1e-5, rngs=rngs)
+        # Pile de num_layers blocs (Linear → LayerNorm → SiLU), réf dreamerv3-flax
+        # (policy.py/mlp.py : MLP profond avant la tête). SiLU = activation projet.
+        # nnx.data() : NNX >=0.12 traite un list brut comme statique → on l'enveloppe
+        # pour que les sous-modules soient bien tracés/comptés par l'optimiseur.
+        linears, norms = [], []
+        in_dim = state_dim
+        for _ in range(num_layers):
+            linears.append(nnx.Linear(in_dim, hidden_dim, rngs=rngs))
+            norms.append(nnx.LayerNorm(hidden_dim, epsilon=1e-5, rngs=rngs))
+            in_dim = hidden_dim
+        self.linears = nnx.data(linears)
+        self.norms = nnx.data(norms)
         self.out = nnx.Linear(hidden_dim, action_dim, rngs=rngs)
 
     def __call__(self, state: jax.Array) -> jax.Array:
@@ -48,8 +58,9 @@ class Actor(nnx.Module):
         Returns:
             logits : (..., action_dim) — raw logits (pas de softmax)
         """
-        x = jax.nn.silu(self.norm1(self.linear1(state)))
-        x = jax.nn.silu(self.norm2(self.linear2(x)))
+        x = state
+        for linear, norm in zip(self.linears, self.norms):
+            x = jax.nn.silu(norm(linear(x)))
         return self.out(x)
 
     def get_dist(

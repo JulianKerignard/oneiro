@@ -36,6 +36,7 @@ import argparse
 import math
 import json
 import os
+from functools import partial
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -44,6 +45,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import jax.random as jr
+from jax.sharding import NamedSharding, PartitionSpec as P, AxisType
 from flax import nnx
 import optax
 
@@ -85,7 +87,7 @@ IMAGINATION_HORIZON = 16
 
 # Optimization (DreamerV3 canonique)
 LR_WM = 1e-4   # aligné symoon11 (réf 17.65) : WM rapide
-LR_AC = 3e-5   # aligné symoon11 : AC ~3x plus lent que le WM (le WM doit être "en avance")
+LR_AC = 1e-4   # AC profond (5×1280) : même LR que le WM (paper DreamerV3)
 GRAD_CLIP_WM = 1000.0  # aligné symoon11 : clip quasi inactif (1.0 écrasait les gradients recon sommés sur 64x64x3 px)
 GRAD_CLIP_AC = 100.0   # aligné symoon11
 GRAD_CLIP = GRAD_CLIP_AC  # défaut générique (optim RND si activé)
@@ -136,21 +138,22 @@ RETURN_PERCENTILE_HIGH = 0.95
 # Critic EMA target network
 CRITIC_TARGET_TAU = 0.98
 
-# Architecture — RÉALIGNÉE sur les proportions officielles DreamerV3 size12m.
-# AVANT (déséquilibré, plafond couche 1-2) : EMBED 192, H_DIM 384, Z 24×24, HIDDEN 768, cnn 32.
-# Problème : deter (mémoire GRU) 5× trop PETIT (384 vs 2048 officiel) → le WM
-# "oublie" → incapable de modéliser les chaînes longues (wood→table→pickaxe).
-# Et MLP 3× trop GROS (768 vs 256) → params gaspillés loin de la mémoire.
-# APRÈS : l'essentiel des params dans le deter récurrent (planification).
-EMBED_DIM = 512          # sortie CNN (était 192)
-H_DIM = 1280             # deter GRU — LA correction mémoire : ×3.3 (était 384)
+# Architecture — Étape 1 : scaling 14.4M → ~75M avec bonne répartition.
+# AVANT (14.4M, AC famélique à 8%) : EMBED 512, H_DIM 1280, Z 32×16, HIDDEN 256, cnn 16,
+# actor/critic = 2 couches × 256.
+# APRÈS (~75M, cible ~72% WM / 28% AC) : WM grossi sur toutes les dims (deter 2048
+# officiel, stochastique 32×32, CNN_DEPTH 32, MLP 1024) ET actor/critic passés en
+# MLP profond dédié (5 couches × 1280, réf dreamerv3-flax) pour porter l'AC à ~28%.
+EMBED_DIM = 1024         # sortie CNN (était 512)
+H_DIM = 2048             # deter GRU — taille officielle DreamerV3 (était 1280)
 Z_CATEGORIES = 32        # 32 variables catégorielles (proportions officielles)
-Z_CLASSES = 16           # × 16 classes (était 24×24)
-HIDDEN_DIM = 256         # MLP units : ÷3 (était 768) — dégonfle les MLP gaspilleurs
-CNN_DEPTH = 16           # base channels CNN (était 32)
-# Budget ~14.4M (≈ les 15M d'avant) mais RÉALLOUÉ : ratio deter:hidden passe de
-# 0.5:1 (mémoire famélique) à 5:1 (mémoire dominante, 49% des params dans le
-# RSSM). Même taille, mais l'agent n'"oublie" plus → vise la couche 3+.
+Z_CLASSES = 32           # × 32 classes → stochastique 32×32 (était 16)
+HIDDEN_DIM = 1024        # MLP units RSSM + reward/continue heads (était 256)
+CNN_DEPTH = 32           # base channels CNN (était 16)
+# Actor-Critic : MLP profond dédié (réf dreamerv3-flax : 5 couches × 1024).
+# On va plus large (1280) pour porter le ratio AC à ~28% du budget total.
+AC_HIDDEN_DIM = 1280     # largeur MLP actor/critic
+AC_NUM_LAYERS = 5        # profondeur (couches cachées) actor/critic
 
 # KL loss DreamerV3
 FREE_BITS = 1.0
@@ -753,6 +756,7 @@ def make_functional_train_steps(
     opt_alpha: nnx.Optimizer = None,
     rnd_module: "RNDModule" = None,
     opt_rnd: nnx.Optimizer = None,
+    repl_sharding=None,
 ):
     """
     Factory : crée les versions fonctionnelles jit-compilées des train steps.
@@ -799,7 +803,24 @@ def make_functional_train_steps(
     if rnd_module is not None and opt_rnd is not None:
         rnd_graphdef, rnd_state = nnx.split((rnd_module, opt_rnd), ...)
 
-    @jax.jit
+    # ----------- Data-parallel : out_shardings pour pinner les sorties.
+    # Le state (params + Adam m/v) reste RÉPLIQUÉ en entrée ET en sortie. Avec
+    # mesh actif + entrées bien shardées, jit propage souvent seul ; annoter
+    # out_shardings (state répliqué) évite des re-placements surprises entre
+    # itérations. Les batchs (entrée) sont shardés côté buffer (device_put).
+    # repl_sharding=None → out_shardings=None = comportement par défaut
+    # (non-régression : aucun changement quand le data-parallel est inactif).
+    repl = repl_sharding  # alias court (None si DP off)
+
+    # train_wm_fn : (new_wm_state[repl], metrics[repl])
+    out_sh_wm = None if repl is None else (repl, repl)
+    # train_ac_fn* : (new_ac_state[repl], new_slow_state[repl],
+    #                 new_ema_std[repl], metrics[repl])
+    out_sh_ac = None if repl is None else (repl, repl, repl, repl)
+    # act_fn_functional : (new_state[repl: h/z petits, répliqués], actions[repl])
+    out_sh_act = None if repl is None else (repl, repl)
+
+    @partial(jax.jit, out_shardings=out_sh_wm)
     def train_wm_fn(wm_state, batch, key):
         # Reconstruct modules + optimizer dans le scope du jit (pure)
         wm_bundle_local, opt_wm_local = nnx.merge(wm_graphdef, wm_state)
@@ -820,7 +841,7 @@ def make_functional_train_steps(
     # entropy_coef est un float Python : JAX cache le trace par valeur tant
     # qu'elle ne change pas (pas de re-trace dans la hot loop si --entropy_coef
     # est constant pour tout le run).
-    @jax.jit
+    @partial(jax.jit, out_shardings=out_sh_ac)
     def train_ac_fn_inner(
         wm_state, ac_state, slow_state,
         batch, return_ema_std, key, entropy_coef,
@@ -850,7 +871,7 @@ def make_functional_train_steps(
 
     # ---- Variante adaptive : prend effective_alpha (alpha appris * auto_explore_mult)
     # en jax.Array. On la trace via le même graphdef que train_ac_fn_inner.
-    @jax.jit
+    @partial(jax.jit, out_shardings=out_sh_ac)
     def train_ac_fn_adaptive(
         wm_state, ac_state, slow_state,
         batch, return_ema_std, key, effective_alpha,
@@ -938,7 +959,11 @@ def make_functional_train_steps(
 
     # Version functional de act_fn : prend les states au lieu des modules.
     # Permet d'utiliser les params à jour SANS muter les modules originaux.
-    @jax.jit
+    # Data-parallel : la COLLECTE n'est PAS shardée (env CPU séquentiel, batch =
+    # n_envs souvent non divisible par device_count). On garde state + I/O
+    # RÉPLIQUÉS (out_shardings=repl) : cohérent avec les states répliqués, pas
+    # de split du petit batch n_envs.
+    @partial(jax.jit, out_shardings=out_sh_act)
     def act_fn_functional(
         wm_state, ac_state,
         prev_state, prev_actions_oh, obs_batch, key,
@@ -1433,6 +1458,27 @@ def main():
     train_ratio_eff = (args.batch_size * SEQ_LEN * args.wm_train_per_iter) / collected_per_iter_total
     print(f"JAX backend : {backend}")
     print(f"Device      : {jax.devices()}")
+
+    # ----------- Data-parallel : mesh 1D sur tous les devices
+    # Stratégie : params + état optimiseur RÉPLIQUÉS, batch SHARDÉ sur l'axe
+    # `data` (split de la dim 0 = B). Activation automatique : 1 device → mesh
+    # trivial (non-régression totale), N devices → vrai data-parallel.
+    #
+    # IMPORTANT : axis_types=Auto (mode GSPMD). Le défaut de jax.make_mesh est
+    # Explicit, qui REJETTE le lax.scan du RSSM / de l'imagination (carry input
+    # non-shardé vs output shardé → TypeError). En mode Auto, XLA propage le
+    # sharding data-parallel à travers le scan et agrège les .mean()/.sum() des
+    # losses cross-shard tout seul — aucun lax.pmean à écrire.
+    n_devices = jax.device_count()
+    mesh = jax.make_mesh((n_devices,), ('data',), axis_types=(AxisType.Auto,))
+    data_sharding = NamedSharding(mesh, P('data'))   # batch : dim 0 (B) shardée
+    repl_sharding = NamedSharding(mesh, P())         # state : répliqué
+    if n_devices > 1:
+        print(f"Sharding    : DATA-PARALLEL sur {n_devices} devices "
+              f"(mesh {mesh.shape}, axis 'data', batch dim0 shardé, state répliqué)")
+    else:
+        print(f"Sharding    : 1 device → mesh trivial (data-parallel inactif, non-régression)")
+
     print(f"Run         : {args.run_name}")
     print(f"Config      : entropy={args.entropy_coef}  train_iter={args.train_iter}  "
           f"n_envs={args.n_envs}  batch={args.batch_size}  seq_len={SEQ_LEN}")
@@ -1459,6 +1505,7 @@ def main():
     BufferClass = ImageReplayBufferJAX if args.buffer_device == "gpu" else ImageReplayBufferCPU
     buffer = BufferClass(
         capacity=args.buffer_capacity, obs_shape=obs_shape, n_envs=n_envs,
+        data_sharding=data_sharding,
     )
     print(f"Buffer      : {args.buffer_device.upper()} "
           f"({args.buffer_capacity:,} cap, {buffer.memory_usage_mb():.0f} MB)")
@@ -1474,11 +1521,20 @@ def main():
     decoder = CNNDecoder(state_dim=rssm.state_dim, out_channels=3, base_channels=CNN_DEPTH, rngs=rngs)
     reward_head = RewardHead(state_dim=rssm.state_dim, hidden_dim=HIDDEN_DIM, rngs=rngs)
     continue_head = ContinueHead(state_dim=rssm.state_dim, hidden_dim=HIDDEN_DIM, rngs=rngs)
-    actor = Actor(state_dim=rssm.state_dim, hidden_dim=HIDDEN_DIM, action_dim=action_dim, rngs=rngs)
-    critic = Critic(state_dim=rssm.state_dim, hidden_dim=HIDDEN_DIM, rngs=rngs)
+    actor = Actor(
+        state_dim=rssm.state_dim, hidden_dim=AC_HIDDEN_DIM, action_dim=action_dim,
+        num_layers=AC_NUM_LAYERS, rngs=rngs,
+    )
+    critic = Critic(
+        state_dim=rssm.state_dim, hidden_dim=AC_HIDDEN_DIM,
+        num_layers=AC_NUM_LAYERS, rngs=rngs,
+    )
 
     # Slow critic : copie initiale du critic
-    slow_critic = Critic(state_dim=rssm.state_dim, hidden_dim=HIDDEN_DIM, rngs=nnx.Rngs(seed + 100))
+    slow_critic = Critic(
+        state_dim=rssm.state_dim, hidden_dim=AC_HIDDEN_DIM,
+        num_layers=AC_NUM_LAYERS, rngs=nnx.Rngs(seed + 100),
+    )
     nnx.update(slow_critic, nnx.state(critic, nnx.Param))
 
     # ----------- Adaptive alpha + RND (Phase 12)
@@ -1578,12 +1634,28 @@ def main():
         wm_bundle, opt_wm, ac_bundle, opt_ac, slow_critic,
         alpha_module=alpha_module, opt_alpha=opt_alpha,
         rnd_module=rnd_module, opt_rnd=opt_rnd,
+        repl_sharding=repl_sharding,
     )
     wm_state = functional["wm_state"]
     ac_state = functional["ac_state"]
     slow_state = functional["slow_state"]
     alpha_state = functional["alpha_state"]
     rnd_state = functional["rnd_state"]
+
+    # ----------- Data-parallel : RÉPLIQUER les states sur tous les devices.
+    # Params + état optimiseur (Adam m/v) sont répliqués (le 75M tient large sur
+    # un core → pas de FSDP). Pas besoin d'init-sous-jit : un device_put du state
+    # déjà construit suffit. Sur 1 device, c'est un no-op fonctionnel.
+    wm_state = jax.device_put(wm_state, repl_sharding)
+    ac_state = jax.device_put(ac_state, repl_sharding)
+    slow_state = jax.device_put(slow_state, repl_sharding)
+    if alpha_state is not None:
+        alpha_state = jax.device_put(alpha_state, repl_sharding)
+    if rnd_state is not None:
+        rnd_state = jax.device_put(rnd_state, repl_sharding)
+    # return_ema_std (array (2,)) : scalaire d'état → répliqué.
+    return_ema_std = jax.device_put(return_ema_std, repl_sharding)
+
     train_wm_fn = functional["train_wm_fn"]
     train_ac_fn = functional["train_ac_fn"]
     train_ac_fn_adaptive = functional["train_ac_fn_adaptive"]
@@ -1606,6 +1678,13 @@ def main():
 
     # ----------- Setup act_fn (jit compilé)
     act_fn = make_act_fn()
+
+    # ----------- Data-parallel : active le mesh pour toute la suite (warmup +
+    # hot loop). Sur 1 device, mesh trivial → aucun effet. La correctness du DP
+    # repose surtout sur les shardings d'entrée (portés par les arrays
+    # device_put) + out_shardings des jit ; ce set_mesh global permet en plus
+    # aux specs P() brutes de résoudre et fixe le contexte d'exécution.
+    jax.set_mesh(mesh)
 
     # ----------- Phase 0 : Warmup random
     print("=" * 60)
@@ -1647,10 +1726,24 @@ def main():
     train_ach_counts = {}
 
     collected_rewards = []
-    # RSSM state multi-env pour la collecte
-    rssm_state_multi = rssm.init_state(n_envs)
-    prev_actions_oh_multi = jnp.zeros((n_envs, action_dim))
+    # RSSM state multi-env pour la collecte.
+    # Data-parallel : la collecte reste RÉPLIQUÉE (non shardée) — batch=n_envs,
+    # env CPU séquentiel. On place l'état initial répliqué pour rester cohérent
+    # avec act_fn_functional (out_shardings=repl).
+    rssm_state_multi = jax.device_put(rssm.init_state(n_envs), repl_sharding)
+    prev_actions_oh_multi = jax.device_put(
+        jnp.zeros((n_envs, action_dim)), repl_sharding)
 
+    # CHOIX RNG (data-parallel) : clé RÉPLIQUÉE sur tous les shards.
+    # jax.lax.axis_index('data') n'est PAS dispo en jit auto/GSPMD (contrairement
+    # à pmap/shard_map), donc pas de bruit distinct par shard sans pré-splitter
+    # une clé shardée. On choisit volontairement le simple : la même clé sur
+    # chaque shard. C'est acceptable car le BATCH diffère déjà par shard (split
+    # de la dim B) → les gradients diffèrent par shard, puis sont moyennés
+    # cross-shard automatiquement sous GSPMD. Le seul effet d'une clé répliquée
+    # est que le bruit stochastique interne (sample z du RSSM, sample actions en
+    # imagination) est corrélé entre shards — impact négligeable sur la
+    # dynamique d'apprentissage, et la non-régression 1-device est exacte.
     main_key = jr.PRNGKey(seed + 1)
     collect_per_iter = max(1, COLLECT_PER_ITER // n_envs)
     t_start = time.time()
@@ -1736,7 +1829,8 @@ def main():
             # sans muter les modules originaux. FIX 3 : device_put explicite.
             prof.tic("act_fn")
             obs_batch_np = np.stack(obs_list)  # (N, C, H, W)
-            obs_batch_jax = jax.device_put(obs_batch_np)
+            # Collecte répliquée (non shardée) : obs sur tous les devices.
+            obs_batch_jax = jax.device_put(obs_batch_np, repl_sharding)
             main_key, subk = jr.split(main_key)
             new_state, actions_int = act_fn_func(
                 wm_state, ac_state,
@@ -1785,7 +1879,8 @@ def main():
             if args.use_rnd and rnd_bonus_fn is not None and rnd_coef_effective > 0.0:
                 # CrafterEnv retourne déjà [0,1], pas de /255 (double-normalisation bug fixé)
                 next_obs_np = np.stack([results[i][0] for i in range(n_envs)]).astype(np.float32)
-                next_obs_jax = jax.device_put(next_obs_np)
+                # Collecte répliquée (cohérent avec rnd_state répliqué).
+                next_obs_jax = jax.device_put(next_obs_np, repl_sharding)
                 rnd_state, bonus_jax = rnd_bonus_fn(rnd_state, next_obs_jax)
                 rnd_bonuses = np.array(bonus_jax)  # (n_envs,)
 
@@ -1831,12 +1926,13 @@ def main():
             prof.toc()
 
             prof.tic("transfer")
-            # FIX 3 : device_put au lieu de jnp.array
+            # FIX 3 : device_put au lieu de jnp.array.
+            # Data-parallel : collecte répliquée (cohérent avec act_fn_functional).
             rssm_state_multi = {
-                "h": jax.device_put(new_h_arr),
-                "z": jax.device_put(new_z_arr),
+                "h": jax.device_put(new_h_arr, repl_sharding),
+                "z": jax.device_put(new_z_arr, repl_sharding),
             }
-            prev_actions_oh_multi = jax.device_put(new_prev_actions)
+            prev_actions_oh_multi = jax.device_put(new_prev_actions, repl_sharding)
             prof.toc()
 
         # ============ (b) Train WM (avec double-buffering du sample)
