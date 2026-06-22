@@ -141,19 +141,18 @@ CRITIC_TARGET_TAU = 0.98
 # Architecture — Étape 1 : scaling 14.4M → ~75M avec bonne répartition.
 # AVANT (14.4M, AC famélique à 8%) : EMBED 512, H_DIM 1280, Z 32×16, HIDDEN 256, cnn 16,
 # actor/critic = 2 couches × 256.
-# APRÈS (~75M, cible ~72% WM / 28% AC) : WM grossi sur toutes les dims (deter 2048
-# officiel, stochastique 32×32, CNN_DEPTH 32, MLP 1024) ET actor/critic passés en
-# MLP profond dédié (5 couches × 1280, réf dreamerv3-flax) pour porter l'AC à ~28%.
-EMBED_DIM = 1024         # sortie CNN (était 512)
-H_DIM = 2048             # deter GRU — taille officielle DreamerV3 (était 1280)
-Z_CATEGORIES = 32        # 32 variables catégorielles (proportions officielles)
-Z_CLASSES = 32           # × 32 classes → stochastique 32×32 (était 16)
-HIDDEN_DIM = 1024        # MLP units RSSM + reward/continue heads (était 256)
-CNN_DEPTH = 32           # base channels CNN (était 16)
-# Actor-Critic : MLP profond dédié (réf dreamerv3-flax : 5 couches × 1024).
-# On va plus large (1280) pour porter le ratio AC à ~28% du budget total.
-AC_HIDDEN_DIM = 1280     # largeur MLP actor/critic
-AC_NUM_LAYERS = 5        # profondeur (couches cachées) actor/critic
+# RETOUR archi 14M (config v26, notre best à 2.45%) pour tester le FIX REWARD isolé :
+# le 75M avait un H_collapse, et le vrai problème était le reward décalé d'1 cran en
+# imagination (corrigé ci-dessus). On valide le fix sur l'archi qui marchait.
+EMBED_DIM = 512          # sortie CNN
+H_DIM = 1280             # deter GRU (config v26 14M)
+Z_CATEGORIES = 32        # 32 variables catégorielles
+Z_CLASSES = 16           # × 16 classes → stochastique 32×16
+HIDDEN_DIM = 256         # MLP units RSSM + reward/continue heads
+CNN_DEPTH = 16           # base channels CNN
+# Actor-Critic : config v26 (2 couches × 256).
+AC_HIDDEN_DIM = 256      # largeur MLP actor/critic
+AC_NUM_LAYERS = 2        # profondeur (couches cachées) actor/critic
 
 # KL loss DreamerV3
 FREE_BITS = 1.0
@@ -410,9 +409,14 @@ def imagine_trajectory(
         new_state, _ = rssm.imagine_step(state, action_oh, subkey_r)
         new_state_vec = jnp.concatenate([new_state["h"], new_state["z"]], axis=-1)
 
-        # Predict reward + continue sur le NEW state (cohérent avec PyTorch)
-        reward_pred = reward_head.predict(new_state_vec)
-        continue_logit = continue_head(new_state_vec)
+        # FIX BUG (plafond sous-Rainbow) : reward + continue prédits sur l'état de
+        # DÉPART state_vec (= s_t), PAS new_state_vec (s_{t+1}). La reward head est
+        # entraînée R_head(s_t) ≈ r(s_t,a_t) (reward SORTANT de s_t) ; la prédire sur
+        # new_state donnait r(s_{t+1},a_{t+1}) → reward décalé d'1 cran dans la λ-return
+        # → crédit temporel faussé → l'imagination guide vers le mauvais reward.
+        # Aligné danijar + symoon11 (reward évalué sur le MÊME état qu'à l'entraînement).
+        reward_pred = reward_head.predict(state_vec)
+        continue_logit = continue_head(state_vec)
         continue_pred = jax.nn.sigmoid(continue_logit)
 
         out = {
