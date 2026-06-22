@@ -87,7 +87,7 @@ IMAGINATION_HORIZON = 16
 
 # Optimization (DreamerV3 canonique)
 LR_WM = 1e-4   # aligné symoon11 (réf 17.65) : WM rapide
-LR_AC = 1e-4   # AC profond (5×1280) : même LR que le WM (paper DreamerV3)
+LR_AC = 3e-5   # AC profond (5×1280) : LR bas (valeur symoon11 gros actor) anti H_collapse
 GRAD_CLIP_WM = 1000.0  # aligné symoon11 : clip quasi inactif (1.0 écrasait les gradients recon sommés sur 64x64x3 px)
 GRAD_CLIP_AC = 100.0   # aligné symoon11
 GRAD_CLIP = GRAD_CLIP_AC  # défaut générique (optim RND si activé)
@@ -141,18 +141,19 @@ CRITIC_TARGET_TAU = 0.98
 # Architecture — Étape 1 : scaling 14.4M → ~75M avec bonne répartition.
 # AVANT (14.4M, AC famélique à 8%) : EMBED 512, H_DIM 1280, Z 32×16, HIDDEN 256, cnn 16,
 # actor/critic = 2 couches × 256.
-# RETOUR archi 14M (config v26, notre best à 2.45%) pour tester le FIX REWARD isolé :
-# le 75M avait un H_collapse, et le vrai problème était le reward décalé d'1 cran en
-# imagination (corrigé ci-dessus). On valide le fix sur l'archi qui marchait.
-EMBED_DIM = 512          # sortie CNN
-H_DIM = 1280             # deter GRU (config v26 14M)
+# Archi ~75M (deter 2048, stochastique 32×32, CNN_DEPTH 32, MLP 1024) + actor/critic
+# profond (5×1280). On teste le FIX REWARD directement sur le 75M (cible) : les effets
+# ne se transfèrent pas entre tailles (co-tuning taille-dépendant). Le H_collapse du
+# gros actor est traité par LR_AC=3e-5 (valeur symoon11 pour gros actor).
+EMBED_DIM = 1024         # sortie CNN
+H_DIM = 2048             # deter GRU (taille officielle DreamerV3)
 Z_CATEGORIES = 32        # 32 variables catégorielles
-Z_CLASSES = 16           # × 16 classes → stochastique 32×16
-HIDDEN_DIM = 256         # MLP units RSSM + reward/continue heads
-CNN_DEPTH = 16           # base channels CNN
-# Actor-Critic : config v26 (2 couches × 256).
-AC_HIDDEN_DIM = 256      # largeur MLP actor/critic
-AC_NUM_LAYERS = 2        # profondeur (couches cachées) actor/critic
+Z_CLASSES = 32           # × 32 classes → stochastique 32×32
+HIDDEN_DIM = 1024        # MLP units RSSM + reward/continue heads
+CNN_DEPTH = 32           # base channels CNN
+# Actor-Critic : MLP profond dédié (5 couches × 1280, réf dreamerv3-flax).
+AC_HIDDEN_DIM = 1280     # largeur MLP actor/critic
+AC_NUM_LAYERS = 5        # profondeur (couches cachées) actor/critic
 
 # KL loss DreamerV3
 FREE_BITS = 1.0
