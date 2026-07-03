@@ -86,7 +86,10 @@ def build_notebook(args) -> dict:
     # backend dans son header, donc pas de cellule de vérif séparée.
     cells = [
         f"!rm -rf oneiro && git clone -b {BRANCH} {REPO_URL}",
-        f'%cd oneiro\n!pip install -q -r requirements.txt && pip install -q -U {jax_pkg}',
+        # FIX env (juil. 2026) : l'image Kaggle est passée à NumPy 2.x, mais le numba
+        # tiré par opensimplex 0.4.5 référence np.row_stack (retiré en NumPy 2.0) → crash
+        # à env.reset(). On force numba récent (compatible NumPy 2, sans row_stack).
+        f'%cd oneiro\n!pip install -q -r requirements.txt && pip install -q -U {jax_pkg} && pip install -q -U "numba>=0.60"',
         f"!WORLDMODEL_OUTPUT_DIR=/kaggle/working {train_cmd}",
     ]
     return {
