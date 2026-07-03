@@ -62,7 +62,9 @@ def build_notebook(args) -> dict:
         f"--buffer_capacity {args.buffer_capacity}",
         f"--run_name {args.run_name}",
     ]
-    if args.no_use_rnd:
+    if getattr(args, "use_rnd", False):
+        flags.append("--use_rnd")
+    else:
         flags.append("--no_use_rnd")
     if args.no_health_auto_stop:
         flags.append("--no_health_auto_stop")
@@ -177,6 +179,8 @@ def main():
     pl.add_argument("--buffer-device", choices=["gpu", "cpu"], default="cpu")
     pl.add_argument("--buffer-capacity", type=int, default=1_000_000)
     pl.add_argument("--no-use-rnd", action="store_true", default=True)
+    pl.add_argument("--use-rnd", action="store_true", default=False,
+                    help="Active RND (bonus d'exploration intrinseque). Defaut off.")
     pl.add_argument("--no-health-auto-stop", action="store_true", default=True)
     pl.add_argument("--extra-args", type=str, default="")
     pl.set_defaults(func=cmd_launch)
