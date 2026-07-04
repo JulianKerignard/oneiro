@@ -1356,6 +1356,9 @@ def parse_args():
                    help="Désactive RND.")
     p.add_argument("--rnd_coef", type=float, default=RND_COEF,
                    help=f"Coef du bonus intrinsèque RND (défaut: {RND_COEF}).")
+    p.add_argument("--rnd_anneal", action="store_true", default=False,
+                   help="Annealing lineaire du rnd_coef vers 0 apres le warmup "
+                        "(exploration tot, exploitation ensuite ; style Burda).")
     # Phase 13 : Safeguards auto-régulateurs
     # SAFEGUARD 1 : RND warmup linéaire (0 → rnd_coef sur N iter)
     p.add_argument("--rnd_warmup_steps", type=int, default=5000,
@@ -1826,6 +1829,14 @@ def main():
             rnd_coef_runtime = float(args.rnd_coef)
         # Sinon : rnd_coef_runtime est piloté par SAFEGUARD 2 (ajusté plus bas).
         rnd_coef_effective = rnd_coef_runtime
+        # ANNEALING (style Burda) : décroissance linéaire du coef vers 0 après le
+        # warmup → le bonus sert à explorer tôt puis s'efface pour laisser
+        # l'exploitation (extrinsèque) prendre le relais. Facteur 1.0 → 0.0.
+        if getattr(args, "rnd_anneal", False):
+            _w = int(args.rnd_warmup_steps)
+            if it >= _w:
+                _span = max(1, args.train_iter - _w)
+                rnd_coef_effective = rnd_coef_runtime * max(0.0, 1.0 - (it - _w) / _span)
 
         # ============ (a) Collecte
         for _ in range(collect_per_iter):
