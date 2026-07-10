@@ -155,9 +155,12 @@ Z_CATEGORIES = 32        # 32 variables catégorielles
 Z_CLASSES = 32           # × 32 classes → stochastique 32×32
 HIDDEN_DIM = 1024        # MLP units RSSM + reward/continue heads
 CNN_DEPTH = 32           # base channels CNN
-# Actor-Critic : MLP profond dédié (5 couches × 1280, réf dreamerv3-flax).
-AC_HIDDEN_DIM = 1280     # largeur MLP actor/critic
-AC_NUM_LAYERS = 5        # profondeur (couches cachées) actor/critic
+# Actor-Critic : MLP 3×1024 (config officielle danijar/dreamerv3 Crafter).
+# 5×1280 (notre invention pour "répartir" les 75M) collapse l'entropie quel que soit
+# le LR (v31/v35/v38 : H_collapse malgré LR 1e-4 puis 3e-5), alors que 2×256 sur le
+# 14M tenait H=1.00 sans souci → l'actor trop profond verrouille sa politique trop vite.
+AC_HIDDEN_DIM = 1024     # largeur MLP actor/critic (danijar)
+AC_NUM_LAYERS = 3        # profondeur (danijar : 3 couches, pas 5)
 
 # KL loss DreamerV3
 FREE_BITS = 1.0
