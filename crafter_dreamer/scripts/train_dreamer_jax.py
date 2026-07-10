@@ -87,7 +87,11 @@ IMAGINATION_HORIZON = 16
 
 # Optimization (DreamerV3 canonique)
 LR_WM = 1e-4   # aligné symoon11 (réf 17.65) : WM rapide
-LR_AC = 3e-5   # AC profond (5×1280) : LR bas (valeur symoon11 gros actor) anti H_collapse
+LR_AC = 1e-4   # valeur v24/v26 (14M, H stable 1.00, 0 collapse). 3e-5 avait été pris pour
+               # contrer le H_collapse du gros actor (v31) : ÉCHEC MESURÉ — v35/v38 collapsent
+               # quand même (11 puis 27 fois, H moyen 0.48) tout en apprenant 3.3× plus lentement
+               # → actor sous-entraîné → ne collecte plus de bois (10-15% vs 42.7%) → pas de craft
+               # dans le buffer. L'anti-collapse est confié à --adaptive_alpha (H_target 1.13).
 GRAD_CLIP_WM = 1000.0  # aligné symoon11 : clip quasi inactif (1.0 écrasait les gradients recon sommés sur 64x64x3 px)
 GRAD_CLIP_AC = 100.0   # aligné symoon11
 GRAD_CLIP = GRAD_CLIP_AC  # défaut générique (optim RND si activé)
