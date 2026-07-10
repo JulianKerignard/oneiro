@@ -165,6 +165,12 @@ W_RECON = 1.0
 W_KL = 1.0
 W_REWARD = 1.0
 W_CONTINUE = 1.0
+# Poids de la CE reward head sur les transitions à reward != 0 (achievements/santé).
+# Contre le déséquilibre de classes (~98.5% de reward nuls) qui fait sous-prédire les +1
+# rares (mesuré : pred~0.05 sur les +1 rares). Calibrage : w=10 → ~13% de la loss sur les
+# rares (vs 1.4% aujourd'hui) ; w~68 → 50/50. Démarrer à 10, plafond ~68 (au-delà : la head
+# hallucine du reward partout). rare_weight=1.0 → moyenne simple (comportement historique).
+REWARD_RARE_WEIGHT = 10.0
 
 # Logging / eval
 LOG_INTERVAL = 50
@@ -514,8 +520,15 @@ def train_step_wm(
             free_bits=FREE_BITS, beta_dyn=BETA_DYN, beta_rep=BETA_REP,
         )
 
-        # Reward (twohot symlog cross-entropy)
-        loss_reward = reward_head.loss(state_vec, rewards)
+        # Reward (twohot symlog CE, pondérée par REWARD_RARE_WEIGHT sur les reward != 0)
+        loss_reward = reward_head.loss(state_vec, rewards, rare_weight=REWARD_RARE_WEIGHT)
+        # Diagnostic (hors gradient) : prédiction reward head sur les états à reward != 0.
+        # Cible avec le fix : ~0.7-1.0 ; sans : ~0.05 (sous-prédiction des +1 rares).
+        _rew_pred = reward_head.predict(state_vec)
+        _nz = (jnp.abs(rewards) > 0.01).astype(jnp.float32)
+        _nz_cnt = jnp.maximum(_nz.sum(), 1.0)
+        rew_pred_nz = (_rew_pred * _nz).sum() / _nz_cnt
+        rew_true_nz = (rewards * _nz).sum() / _nz_cnt
 
         # Continue (BCE)
         continue_target = 1.0 - dones.astype(jnp.float32)
@@ -531,6 +544,8 @@ def train_step_wm(
             "loss_kl": loss_kl,
             "loss_reward": loss_reward,
             "loss_continue": loss_continue,
+            "rew_pred_nz": rew_pred_nz,
+            "rew_true_nz": rew_true_nz,
         }
         return loss_wm, aux
 
@@ -2111,7 +2126,8 @@ def main():
             print(
                 f"  iter {it+1:5d}/{args.train_iter} [{pct:4.1f}%] | "
                 f"WM wm={vals.get('loss_wm', 0):.2f} rec={vals.get('loss_recon', 0):.2f} "
-                f"kl={vals.get('loss_kl', 0):.2f} rew={vals.get('loss_reward', 0):.3f} con={vals.get('loss_continue', 0):.3f} | "
+                f"kl={vals.get('loss_kl', 0):.2f} rew={vals.get('loss_reward', 0):.3f} con={vals.get('loss_continue', 0):.3f} "
+                f"rew@nz={vals.get('rew_pred_nz', 0):.2f}/{vals.get('rew_true_nz', 0):.2f} | "
                 f"AC act={vals.get('loss_actor', 0):.3f} crit={vals.get('loss_critic', 0):.3f} "
                 f"pg={vals.get('loss_actor_pg', 0):.3f} H={vals.get('entropy', 0):.2f} | "
                 f"img ret={vals.get('returns_mean', 0):.2f} val={vals.get('values_mean', 0):.2f} "

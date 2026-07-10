@@ -138,21 +138,26 @@ class RewardHead(nnx.Module):
         logits = self(state)
         return twohot_decode(logits, self.bins)
 
-    def loss(self, state: jax.Array, target: jax.Array) -> jax.Array:
+    def loss(self, state: jax.Array, target: jax.Array, rare_weight: float = 1.0) -> jax.Array:
         """
-        Cross-entropy entre logits prédits et twohot(target).
+        Cross-entropy pondérée entre logits prédits et twohot(target).
 
         Args:
-            state  : (..., state_dim)
-            target : (...,) scalaires en espace original
+            state       : (..., state_dim)
+            target      : (...,) scalaires en espace original
+            rare_weight : poids sur les transitions à reward != 0 (achievements/santé).
+                          Contre le déséquilibre de classes (reward Crafter ~98.5% nuls)
+                          qui fait sous-prédire les +1 rares. rare_weight=1.0 → moyenne simple.
 
         Returns:
-            loss scalaire (moyenne sur le batch)
+            loss scalaire (moyenne pondérée sur le batch)
         """
         logits = self(state)
         target_twohot = jax.lax.stop_gradient(twohot_encode(target, self.bins))
         log_probs = jax.nn.log_softmax(logits, axis=-1)
-        return -(target_twohot * log_probs).sum(-1).mean()
+        ce = -(target_twohot * log_probs).sum(-1)                      # (...,) CE par transition
+        weights = jnp.where(jnp.abs(target) > 0.01, rare_weight, 1.0)  # rare_weight sur reward != 0
+        return (ce * weights).sum() / weights.sum()                    # moyenne pondérée
 
 
 # ============================== ContinueHead (BCE)
