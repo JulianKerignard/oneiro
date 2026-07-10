@@ -175,7 +175,7 @@ REWARD_RARE_WEIGHT = 10.0
 # Logging / eval
 LOG_INTERVAL = 50
 EVAL_INTERVAL = 2000
-EVAL_EPISODES = 10
+EVAL_EPISODES = 75   # 10 était trop bruité pour trancher un fix (écart-type ~0.5 ach sur 10 eps)
 
 
 # ============================== Phase 13 : Safeguards auto-régulateurs
@@ -522,13 +522,20 @@ def train_step_wm(
 
         # Reward (twohot symlog CE, pondérée par REWARD_RARE_WEIGHT sur les reward != 0)
         loss_reward = reward_head.loss(state_vec, rewards, rare_weight=REWARD_RARE_WEIGHT)
-        # Diagnostic (hors gradient) : prédiction reward head sur les états à reward != 0.
-        # Cible avec le fix : ~0.7-1.0 ; sans : ~0.05 (sous-prédiction des +1 rares).
+        # Diagnostic (hors gradient) de la reward head, en 2 populations séparées.
+        # Le seuil 0.01 mélangeait santé (±0.1, fréquente) et achievements (+1, rares) :
+        # la moyenne noyait le signal. On isole donc les achievements à |r| > 0.5.
+        #   rew_pred_ach : prédiction sur les ACHIEVEMENTS (true=+1). Sans fix ~0.05-0.3 ;
+        #                  cible avec fix ~0.7-1.0. C'est LE critère (indépendant du bruit d'éval).
+        #   rew_pred_zero: prédiction sur les états à reward NUL. Doit rester ~0.
+        #                  S'il monte → la head hallucine du reward (rare_weight trop fort).
         _rew_pred = reward_head.predict(state_vec)
-        _nz = (jnp.abs(rewards) > 0.01).astype(jnp.float32)
-        _nz_cnt = jnp.maximum(_nz.sum(), 1.0)
-        rew_pred_nz = (_rew_pred * _nz).sum() / _nz_cnt
-        rew_true_nz = (rewards * _nz).sum() / _nz_cnt
+        _ach = (jnp.abs(rewards) > 0.5).astype(jnp.float32)
+        _zero = (jnp.abs(rewards) <= 0.01).astype(jnp.float32)
+        rew_pred_ach = (_rew_pred * _ach).sum() / jnp.maximum(_ach.sum(), 1.0)
+        rew_true_ach = (rewards * _ach).sum() / jnp.maximum(_ach.sum(), 1.0)
+        rew_pred_zero = (_rew_pred * _zero).sum() / jnp.maximum(_zero.sum(), 1.0)
+        rew_n_ach = _ach.sum()
 
         # Continue (BCE)
         continue_target = 1.0 - dones.astype(jnp.float32)
@@ -544,8 +551,10 @@ def train_step_wm(
             "loss_kl": loss_kl,
             "loss_reward": loss_reward,
             "loss_continue": loss_continue,
-            "rew_pred_nz": rew_pred_nz,
-            "rew_true_nz": rew_true_nz,
+            "rew_pred_ach": rew_pred_ach,
+            "rew_true_ach": rew_true_ach,
+            "rew_pred_zero": rew_pred_zero,
+            "rew_n_ach": rew_n_ach,
         }
         return loss_wm, aux
 
@@ -711,6 +720,14 @@ def train_step_ac(
             "return_p5_batch": p5_batch,
             "return_p95_batch": p95_batch,
             "return_scale": scale,
+            # Reward PRÉDIT dans l'imagination : c'est le SEUL signal que voit l'actor
+            # (il ne voit jamais les vraies récompenses). Si img_rew_max reste ~0, aucune
+            # trajectoire rêvée ne contient de récompense de taille achievement (+1) →
+            # l'actor ne peut pas apprendre le craft, quel que soit rare_weight.
+            "img_rew_mean": jnp.mean(rewards_pred),
+            "img_rew_max": jnp.max(rewards_pred),
+            "img_rew_p99": jnp.quantile(rewards_pred.reshape(-1), 0.99),
+            "img_rew_frac_hi": jnp.mean((rewards_pred > 0.5).astype(jnp.float32)),
         }
         return loss_ac, aux
 
@@ -2127,10 +2144,13 @@ def main():
                 f"  iter {it+1:5d}/{args.train_iter} [{pct:4.1f}%] | "
                 f"WM wm={vals.get('loss_wm', 0):.2f} rec={vals.get('loss_recon', 0):.2f} "
                 f"kl={vals.get('loss_kl', 0):.2f} rew={vals.get('loss_reward', 0):.3f} con={vals.get('loss_continue', 0):.3f} "
-                f"rew@nz={vals.get('rew_pred_nz', 0):.2f}/{vals.get('rew_true_nz', 0):.2f} | "
+                f"rew@ach={vals.get('rew_pred_ach', 0):.2f}/{vals.get('rew_true_ach', 0):.2f}"
+                f"(n={vals.get('rew_n_ach', 0):.0f}) rew@0={vals.get('rew_pred_zero', 0):+.3f} | "
                 f"AC act={vals.get('loss_actor', 0):.3f} crit={vals.get('loss_critic', 0):.3f} "
                 f"pg={vals.get('loss_actor_pg', 0):.3f} H={vals.get('entropy', 0):.2f} | "
                 f"img ret={vals.get('returns_mean', 0):.2f} val={vals.get('values_mean', 0):.2f} "
+                f"imgR(mu={vals.get('img_rew_mean', 0):.3f} max={vals.get('img_rew_max', 0):.2f} "
+                f"p99={vals.get('img_rew_p99', 0):.2f} hi={100*vals.get('img_rew_frac_hi', 0):.2f}%) "
                 f"scale={vals.get('return_scale', 1.0):.2f} p5={float(return_ema_std[0]):.2f} p95={float(return_ema_std[1]):.2f}"
                 f"{alpha_tag}{ax_tag}{rnd_tag}{h_tgt_tag} | "
                 f"r/step={history['env_reward_per_step'][-1]:.4f} | {ips:.1f} ips ETA {eta_tag}"
@@ -2220,6 +2240,19 @@ def main():
                 print(f"      unlocked ({len(ranked)}/{len(ACHIEVEMENTS)}): {detail_str}")
             else:
                 print(f"      unlocked (0/{len(ACHIEVEMENTS)}): — aucun achievement débloqué")
+
+            # Détail sur les épisodes de TRAIN (n = centaines) : 40× moins bruité que
+            # l'éval (n=EVAL_EPISODES) et c'est la base du crafter_score. Surtout :
+            # un achievement à 0 occurrence ici = ZÉRO exemple dans le buffer, donc la
+            # reward head ne peut PAS l'apprendre (problème de donnée, pas de head).
+            if train_episode_count > 0:
+                train_ranked = sorted(train_ach_counts.items(), key=lambda kv: -kv[1])
+                train_str = "  ".join(
+                    f"{n}={c}({100.0*c/train_episode_count:.1f}%)" for n, c in train_ranked
+                ) or "— aucun"
+                never = [a for a in ACHIEVEMENTS if train_ach_counts.get(a, 0) == 0]
+                print(f"      TRAIN ({len(train_ranked)}/{len(ACHIEVEMENTS)} sur {train_episode_count} eps): {train_str}")
+                print(f"      JAMAIS vus en train ({len(never)}) : {'  '.join(never) if never else '—'}")
 
             # ---- Auto-explore : détection de stagnation
             if args.auto_explore:
