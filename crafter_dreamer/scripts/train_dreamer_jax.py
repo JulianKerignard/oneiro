@@ -172,11 +172,13 @@ W_RECON = 1.0
 W_KL = 1.0
 W_REWARD = 1.0
 W_CONTINUE = 1.0
-# Poids de la CE reward head sur les transitions à reward != 0 (achievements/santé).
-# Contre le déséquilibre de classes (~98.5% de reward nuls) qui fait sous-prédire les +1
-# rares (mesuré : pred~0.05 sur les +1 rares). Calibrage : w=10 → ~13% de la loss sur les
-# rares (vs 1.4% aujourd'hui) ; w~68 → 50/50. Démarrer à 10, plafond ~68 (au-delà : la head
-# hallucine du reward partout). rare_weight=1.0 → moyenne simple (comportement historique).
+# Poids de la CE reward head sur les ACHIEVEMENTS (|r| > 0.5) UNIQUEMENT — cf. heads.py.
+# Contre le déséquilibre de classes (les +1 = ~1.4% des transitions) qui fait sous-prédire
+# les achievements rares (mesuré v37 : pred~0.05-0.31 sur les +1). Calibrage (seuil 0.5) :
+# w=10 → ~12% de la loss sur les achievements. HISTORIQUE v38-v43 : le seuil était 0.01 et
+# pondérait AUSSI la santé (±0.1, 2.7× plus fréquente) → leakage rew@0=+0.015 → inflation
+# critic +5 (γ=0.997) → scale 2.7→7.7 → PG écrasé ÷2.5. Fix v44 : seuil 0.5 (heads.py),
+# la santé revient à poids 1. Critères de succès : rew@0 ≤ +0.005, scale ≤ 5.
 REWARD_RARE_WEIGHT = 10.0
 
 # Logging / eval
