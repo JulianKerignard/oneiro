@@ -463,7 +463,8 @@ class ImageReplayBufferJAX:
 
     # --------------------------------------------------------------- sample
 
-    def sample_sequences(self, key, batch_size: int, seq_len: int) -> dict:
+    def sample_sequences(self, key, batch_size: int, seq_len: int,
+                         priority_frac: float = 0.0) -> dict:
         """
         Sample batch_size séquences de seq_len steps consécutifs, chacune
         entièrement dans UN env (vraie trajectoire temporelle).
@@ -472,6 +473,9 @@ class ImageReplayBufferJAX:
             key : jax.random.PRNGKey pour le sampling (env, start).
             batch_size : nombre de séquences.
             seq_len : longueur de chaque séquence.
+            priority_frac : accepté pour compat d'API avec le buffer CPU ;
+                le prioritized replay n'est PAS implémenté côté GPU (le chemin
+                TPU/production utilise ImageReplayBufferCPU). Ignoré ici.
 
         Returns:
             dict avec jax.Array sur GPU :
@@ -591,13 +595,22 @@ class ImageReplayBufferCPU:
         """No-op (pas de staging GPU en mode CPU) — présent pour la compat API."""
         pass
 
-    def sample_sequences(self, key, batch_size: int, seq_len: int) -> dict:
+    def sample_sequences(self, key, batch_size: int, seq_len: int,
+                         priority_frac: float = 0.0) -> dict:
         """
         Sample batch_size séquences mono-env, gather en RAM puis transfert GPU.
 
         Le sampling des indices utilise la PRNGKey jax (reproductible, aligné
         sur la version GPU) ; le gather est numpy, et seul le batch est
         device_put (uint8 → cast float32 sur GPU).
+
+        priority_frac : fraction du batch (0..1) forcée à contenir un ACHIEVEMENT
+            (reward > 0.5) dans sa fenêtre. Prioritized replay par récompense —
+            destiné au batch AC pour ré-ancrer l'imagination sur des états actifs
+            (près d'un +1) au lieu de longues séquences plates. NB : sur-échantillonne
+            TOUS les achievements confondus (le buffer ne stocke que reward=+1, pas
+            QUEL achievement) → les fréquents (wake_up ~95%) dominent, les rares
+            (place_table ~0.7%) sont boostés mais restent minoritaires.
         """
         min_size = int(self.size_env.min())
         if min_size < seq_len:
@@ -605,9 +618,31 @@ class ImageReplayBufferCPU:
                 f"Buffer trop petit pour seq : min(size_env)={min_size} < {seq_len}")
 
         max_start = min_size - seq_len
-        k_env, k_start = jax.random.split(key)
+        k_env, k_start, k_prio = jax.random.split(key, 3)
         env_idx = np.asarray(jax.random.randint(k_env, (batch_size,), 0, self.n_envs))
         starts = np.asarray(jax.random.randint(k_start, (batch_size,), 0, max_start + 1))
+
+        # Prioritized replay (reward > 0.5) : remplace les n_prio premières
+        # séquences par des fenêtres GARANTIES contenir un achievement.
+        n_prio = int(round(batch_size * float(priority_frac)))
+        if n_prio > 0:
+            seed = int(jax.random.randint(k_prio, (), 0, 2_000_000_000))
+            rng = np.random.default_rng(seed)
+            # Positions (env, t) à reward > 0.5 dans la zone valide [0, min_size).
+            nz_e, nz_t = np.nonzero(self.rewards[:, :min_size] > 0.5)
+            if nz_e.size > 0:
+                env_idx = np.array(env_idx)  # copie writable (np.asarray(jax) est read-only)
+                starts = np.array(starts)
+                pick = rng.integers(0, nz_e.size, size=n_prio)
+                pe, pt = nz_e[pick], nz_t[pick]
+                # start tel que la fenêtre [start, start+seq_len) couvre pt
+                lo = np.maximum(0, pt - seq_len + 1)
+                hi = np.minimum(pt, max_start)
+                span = (hi - lo + 1).astype(np.float64)
+                ps = (lo + rng.random(n_prio) * span).astype(np.int64)
+                ps = np.clip(ps, 0, max_start)
+                env_idx[:n_prio] = pe
+                starts[:n_prio] = ps
 
         # Gather numpy (B, T) dans l'env choisi
         t_idx = starts[:, None] + np.arange(seq_len)[None, :]   # (B, T)

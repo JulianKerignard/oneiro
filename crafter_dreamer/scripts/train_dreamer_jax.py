@@ -1353,6 +1353,11 @@ def parse_args():
     p.add_argument("--batch_size", type=int, default=BATCH_SIZE)
     p.add_argument("--wm_train_per_iter", type=int, default=WM_TRAIN_PER_ITER)
     p.add_argument("--ac_train_per_iter", type=int, default=AC_TRAIN_PER_ITER)
+    p.add_argument("--replay_priority_frac", type=float, default=0.0,
+                   help="Fraction du batch AC forcée à contenir un achievement (reward>0.5). "
+                        "Prioritized replay reward, AC SEULEMENT (le WM garde une distribution "
+                        "non-biaisée). 0.0 = off. Ne cible pas un achievement précis (buffer ne "
+                        "stocke que reward=+1) → tous achievements confondus.")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--warmup_steps", type=int, default=WARMUP_STEPS)
     p.add_argument("--profile", action="store_true",
@@ -1849,7 +1854,8 @@ def main():
     # garanti par la Phase 0 plus haut (warmup_steps >= SEQ_LEN).
     main_key, k_wm0, k_ac0 = jr.split(main_key, 3)
     batch_wm_next = buffer.sample_sequences(k_wm0, args.batch_size, SEQ_LEN)
-    batch_ac_next = buffer.sample_sequences(k_ac0, args.batch_size, SEQ_LEN)
+    batch_ac_next = buffer.sample_sequences(k_ac0, args.batch_size, SEQ_LEN,
+                                            priority_frac=args.replay_priority_frac)
 
     if start_iter > 0:
         print(f"[resume] Boucle reprise à iter {start_iter} (jusqu'à {args.train_iter})")
@@ -2036,7 +2042,8 @@ def main():
         prof.tic("sample_batch")
         batch_ac_current = batch_ac_next
         main_key, subk = jr.split(main_key)
-        batch_ac_next = buffer.sample_sequences(subk, args.batch_size, SEQ_LEN)
+        batch_ac_next = buffer.sample_sequences(subk, args.batch_size, SEQ_LEN,
+                                                priority_frac=args.replay_priority_frac)
         prof.toc()
 
         prof.tic("train_ac")
@@ -2078,7 +2085,8 @@ def main():
         for _ in range(args.ac_train_per_iter - 1):
             prof.tic("sample_batch")
             main_key, subk = jr.split(main_key)
-            batch_extra = buffer.sample_sequences(subk, args.batch_size, SEQ_LEN)
+            batch_extra = buffer.sample_sequences(subk, args.batch_size, SEQ_LEN,
+                                                  priority_frac=args.replay_priority_frac)
             prof.toc()
             prof.tic("train_ac")
             main_key, subk = jr.split(main_key)
