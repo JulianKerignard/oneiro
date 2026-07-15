@@ -71,6 +71,14 @@ def build_notebook(args) -> dict:
     if args.extra_args:
         flags.append(args.extra_args)
     train_cmd = "python -u crafter_dreamer/scripts/train_dreamer_jax.py " + " ".join(flags)
+    # RESUME : le kernel précédent (kernel_sources) est monté sous /kaggle/input/<slug>/.
+    # On reprend le checkpoint iterXXXXXX le plus avancé (zero-padded → tri lexical OK).
+    # Fail-fast : si aucun checkpoint trouvé, le && court-circuite et le train ne part pas.
+    train_prefix = ""
+    if getattr(args, "resume_from_kernel", None):
+        train_prefix = ('CKPT=$(ls -1 /kaggle/input/*/checkpoints/*iter*.npz 2>/dev/null | sort | tail -1) && '
+                        'echo "RESUME depuis $CKPT" && ')
+        train_cmd += ' --resume_from "$CKPT"'
 
     # JAX backend selon l'accélérateur : cuda12 pour GPU, tpu pour TPU v5e-8.
     # Sur TPU v5e-8, JAX voit les 8 cores ; le training s'auto-active en
@@ -92,7 +100,7 @@ def build_notebook(args) -> dict:
         # tiré par opensimplex 0.4.5 référence np.row_stack (retiré en NumPy 2.0) → crash
         # à env.reset(). On force numba récent (compatible NumPy 2, sans row_stack).
         f'%cd oneiro\n!pip install -q -r requirements.txt && pip install -q -U {jax_pkg} && pip install -q -U "numba>=0.60"',
-        f"!WORLDMODEL_OUTPUT_DIR=/kaggle/working {train_cmd}",
+        f"!{train_prefix}WORLDMODEL_OUTPUT_DIR=/kaggle/working {train_cmd}",
     ]
     return {
         "cells": [
@@ -105,7 +113,10 @@ def build_notebook(args) -> dict:
     }
 
 
-def kernel_metadata(user, slug, tpu=False) -> dict:
+def kernel_metadata(user, slug, tpu=False, resume_from_kernel=None) -> dict:
+    # kernel_sources : monte l'OUTPUT du kernel cité sous /kaggle/input/<slug>/
+    # (checkpoints .npz + .meta.json inclus) → utilisé par --resume-from-kernel.
+    sources = [f"{user}/{resume_from_kernel}"] if resume_from_kernel else []
     meta = {
         "id": f"{user}/{slug}",
         "title": slug,
@@ -116,7 +127,7 @@ def kernel_metadata(user, slug, tpu=False) -> dict:
         "enable_internet": True,    # requis pour git clone + pip
         "dataset_sources": [],
         "competition_sources": [],
-        "kernel_sources": [],
+        "kernel_sources": sources,
     }
     if tpu:
         # /!\ champ accélérateur TPU Kaggle à confirmer au 1er push (v5e-8).
@@ -132,9 +143,15 @@ def cmd_launch(args):
     slug = args.run_name.lower().replace("_", "-")[:50]
     work = Path(tempfile.mkdtemp(prefix="kaggle_oneiro_"))
     (work / "notebook.ipynb").write_text(json.dumps(build_notebook(args)))
-    (work / "kernel-metadata.json").write_text(json.dumps(kernel_metadata(user, slug, args.tpu), indent=2))
+    resume_slug = getattr(args, "resume_from_kernel", None)
+    if resume_slug:
+        resume_slug = resume_slug.lower().replace("_", "-")[:50]
+    (work / "kernel-metadata.json").write_text(
+        json.dumps(kernel_metadata(user, slug, args.tpu, resume_from_kernel=resume_slug), indent=2))
     accel = "TPU v5e-8" if args.tpu else "GPU P100"
     print(f"Kernel   : {user}/{slug}")
+    if resume_slug:
+        print(f"Resume   : depuis l'output de {user}/{resume_slug} (checkpoint iter le plus avancé)")
     print(f"Config   : {args.train_iter} iter, buffer {args.buffer_device} {args.buffer_capacity:,}")
     print(f"Staging  : {work}")
     print(f"Push (save & run all sur {accel})...\n")
@@ -183,6 +200,9 @@ def main():
                     help="Active RND (bonus d'exploration intrinseque). Defaut off.")
     pl.add_argument("--no-health-auto-stop", action="store_true", default=True)
     pl.add_argument("--extra-args", type=str, default="")
+    pl.add_argument("--resume-from-kernel", type=str, default=None,
+                    help="Slug d'un kernel précédent : monte son output (kernel_sources) et "
+                         "reprend son checkpoint iterXXXXXX le plus avancé via --resume_from.")
     pl.set_defaults(func=cmd_launch)
 
     for name, fn in (("status", cmd_status), ("pull", cmd_pull)):
