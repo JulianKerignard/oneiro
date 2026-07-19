@@ -593,9 +593,17 @@ def train_step_ac(
     key: jax.Array,
     entropy_coef: float,
     effective_alpha: jax.Array = None,
+    actor_coef: jax.Array = None,
 ) -> tuple:
     """
     Un train step Actor + Critic via imagination dans le WM.
+
+    actor_coef : scalaire jnp (défaut 1.0). Multiplie la loss actor (PG+entropy).
+      0.0 = AC WARMUP : le CRITIC apprend les values (et l'EMA du scale chauffe)
+      pendant que l'actor reste gelé (gradients nuls). Évite le double piège du
+      démarrage : (a) l'actor se verrouille sur les returns bruités d'un WM nul
+      (rich-get-richer, H 2.5→0.1 en <200 iters sur les actors >=1024) ; (b) au
+      dégel, un critic à zéro rendrait tous les advantages positifs → re-collapse.
 
     Étapes :
       1. Encode batch + RSSM observe → initial states (stop_gradient, WM gelé).
@@ -708,7 +716,9 @@ def train_step_ac(
         )
         loss_critic = loss_critic_main + 1.0 * loss_critic_slowreg
 
-        loss_ac = loss_actor + loss_critic
+        # actor_coef=0.0 (warmup) : seul le critic reçoit du gradient.
+        ac_coef = 1.0 if actor_coef is None else actor_coef
+        loss_ac = ac_coef * loss_actor + loss_critic
 
         mean_H = jnp.mean(traj["entropies"])
         # Percentiles du batch courant (pour update EMA hors gradient)
@@ -890,7 +900,7 @@ def make_functional_train_steps(
     @partial(jax.jit, out_shardings=out_sh_ac)
     def train_ac_fn_inner(
         wm_state, ac_state, slow_state,
-        batch, return_ema_std, key, entropy_coef,
+        batch, return_ema_std, key, entropy_coef, actor_coef=None,
     ):
         # Reconstruct AC + slow_critic + WM (read-only pour AC) dans le scope du jit
         ac_bundle_local, opt_ac_local = nnx.merge(ac_graphdef, ac_state)
@@ -903,6 +913,7 @@ def make_functional_train_steps(
             encoder_l, rssm_l, reward_l, continue_l,
             actor_l, critic_l, slow_local,
             opt_ac_local, batch, return_ema_std, key, entropy_coef,
+            actor_coef=actor_coef,
         )
 
         # Re-split AC et slow_critic
@@ -920,7 +931,7 @@ def make_functional_train_steps(
     @partial(jax.jit, out_shardings=out_sh_ac)
     def train_ac_fn_adaptive(
         wm_state, ac_state, slow_state,
-        batch, return_ema_std, key, effective_alpha,
+        batch, return_ema_std, key, effective_alpha, actor_coef=None,
     ):
         ac_bundle_local, opt_ac_local = nnx.merge(ac_graphdef, ac_state)
         actor_l, critic_l = ac_bundle_local
@@ -934,6 +945,7 @@ def make_functional_train_steps(
             opt_ac_local, batch, return_ema_std, key,
             entropy_coef=0.0,  # ignoré quand effective_alpha est fourni
             effective_alpha=effective_alpha,
+            actor_coef=actor_coef,
         )
 
         new_ac_state = nnx.split((ac_bundle_local, opt_ac_local), ...)[1]
@@ -1355,6 +1367,14 @@ def parse_args():
     p.add_argument("--batch_size", type=int, default=BATCH_SIZE)
     p.add_argument("--wm_train_per_iter", type=int, default=WM_TRAIN_PER_ITER)
     p.add_argument("--ac_train_per_iter", type=int, default=AC_TRAIN_PER_ITER)
+    p.add_argument("--ac_warmup_iters", type=int, default=0,
+                   help="Gèle l'actor-critic pendant N itérations (le WM apprend seul, "
+                        "collecte via l'actor uniforme). Protège du verrouillage de politique "
+                        "au démarrage (H 2.5→0.1 en <200 iters sur les actors >=1024 quand "
+                        "l'AC apprend sur un WM encore nul). 0 = off (comportement historique).")
+    p.add_argument("--rare_weight", type=float, default=None,
+                   help="Override de REWARD_RARE_WEIGHT (poids CE des achievements). "
+                        "None = constante du fichier.")
     p.add_argument("--replay_priority_frac", type=float, default=0.0,
                    help="Fraction du batch AC forcée à contenir un achievement (reward>0.5). "
                         "Prioritized replay reward, AC SEULEMENT (le WM garde une distribution "
@@ -1491,6 +1511,12 @@ class Profiler:
 
 def main():
     args = parse_args()
+
+    # Override runtime de REWARD_RARE_WEIGHT (--rare_weight). Doit se faire AVANT
+    # le premier trace jit de train_step_wm (qui capture la globale au trace).
+    if getattr(args, "rare_weight", None) is not None:
+        globals()["REWARD_RARE_WEIGHT"] = float(args.rare_weight)
+        print(f"[override] REWARD_RARE_WEIGHT = {REWARD_RARE_WEIGHT}")
 
     # Si mp_collect : forcer spawn (compat JAX/CUDA). Doit être fait avant
     # toute création de process. Idempotent : ne fail pas si déjà set.
@@ -2041,6 +2067,16 @@ def main():
             prof.toc()
 
         # ============ (c) Train AC (avec double-buffering du sample)
+        # AC WARMUP : geler l'actor-critic pendant les ac_warmup_iters premières
+        # itérations — le WM apprend seul (collecte via l'actor uniforme zero-init
+        # = exploration random). Sans ce gel, l'AC apprend sur un WM encore nul :
+        # returns imaginés = bruit biaisé positif → chaque action échantillonnée
+        # est renforcée (rich-get-richer) → verrouillage de la politique. Mesuré :
+        # H 2.5→0.08-0.18 en <200 iters sur TOUS les runs 75M (actor >=1024),
+        # alors que le 14M (actor 2x256) résiste (H 2.59 -> 1.73 en douceur).
+        ac_frozen = it < args.ac_warmup_iters
+        # jnp.array (dynamique) → un seul trace jit pour les deux phases.
+        actor_coef = jnp.array(0.0 if ac_frozen else 1.0, dtype=jnp.float32)
         prof.tic("sample_batch")
         batch_ac_current = batch_ac_next
         main_key, subk = jr.split(main_key)
@@ -2059,20 +2095,20 @@ def main():
             ac_state, slow_state, return_ema_std, ac_metrics = train_ac_fn_adaptive(
                 wm_state, ac_state, slow_state,
                 batch_ac_current, return_ema_std, subk,
-                effective_alpha,
+                effective_alpha, actor_coef,
             )
         else:
             ent_coef_eff = float(args.entropy_coef) * auto_explore_multiplier
             ac_state, slow_state, return_ema_std, ac_metrics = train_ac_fn(
                 wm_state, ac_state, slow_state,
                 batch_ac_current, return_ema_std, subk,
-                ent_coef_eff,
+                ent_coef_eff, actor_coef,
             )
         last_metrics.update(ac_metrics)
         prof.toc()
 
         # ---- Train adaptive alpha (après le train AC, utilise mean_H observé)
-        if args.adaptive_alpha and train_alpha_fn is not None:
+        if not ac_frozen and args.adaptive_alpha and train_alpha_fn is not None:
             mean_H = ac_metrics["H"]
             # SAFEGUARD 4 : H_target curriculum (linear schedule)
             h_target_cur = get_h_target(it, args)
@@ -2083,7 +2119,8 @@ def main():
             current_alpha_val = float(alpha_metrics["alpha"])
             last_metrics["alpha"] = alpha_metrics["alpha"]
 
-        # Train steps additionnels (cas ac_train_per_iter > 1)
+        # Train steps additionnels (cas ac_train_per_iter > 1). Pendant le warmup
+        # (actor_coef=0), ces steps continuent d'entraîner le CRITIC.
         for _ in range(args.ac_train_per_iter - 1):
             prof.tic("sample_batch")
             main_key, subk = jr.split(main_key)
@@ -2099,18 +2136,18 @@ def main():
                 ac_state, slow_state, return_ema_std, ac_metrics = train_ac_fn_adaptive(
                     wm_state, ac_state, slow_state,
                     batch_extra, return_ema_std, subk,
-                    effective_alpha,
+                    effective_alpha, actor_coef,
                 )
             else:
                 ent_coef_eff = float(args.entropy_coef) * auto_explore_multiplier
                 ac_state, slow_state, return_ema_std, ac_metrics = train_ac_fn(
                     wm_state, ac_state, slow_state,
                     batch_extra, return_ema_std, subk,
-                    ent_coef_eff,
+                    ent_coef_eff, actor_coef,
                 )
             last_metrics.update(ac_metrics)
             prof.toc()
-            if args.adaptive_alpha and train_alpha_fn is not None:
+            if not ac_frozen and args.adaptive_alpha and train_alpha_fn is not None:
                 mean_H = ac_metrics["H"]
                 # FIX : utiliser le schedule (comme la boucle principale),
                 # pas args.h_target brut (=2.0) qui ignorait h_target_schedule.
