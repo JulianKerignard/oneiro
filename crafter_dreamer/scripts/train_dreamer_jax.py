@@ -87,12 +87,11 @@ IMAGINATION_HORIZON = 16
 
 # Optimization (DreamerV3 canonique)
 LR_WM = 1e-4   # aligné symoon11 (réf 17.65) : WM rapide
-LR_AC = 3e-5   # symoon11 EXACT (réf 17.65) : LR policy+critic = 3e-5 fixe. Le "dilemme"
-               # 3e-5-sous-entraîne / 1e-4-collapse était un FAUX dilemme : 3e-5 est le bon LR
-               # actor (évite le collapse), MAIS il n'a jamais été testé avec ratio 512 (v35 =
-               # 3e-5 mais ratio 128 → critic 4× trop lent → sous-entraîné). À ratio 512, le
-               # critic centre les advantages assez vite → 3e-5 tient H sans sous-entraîner.
-               # Diag sources croisées danijar+symoon11 (2026-07-20) : ni muP ni contrôleur d'entropie.
+LR_AC = 1e-4   # RETENU sur preuve statistique (audit adversarial 2026-07-22) : sur 15 runs,
+               # lr 1e-4 → 1.94% moyen (n=9, best 2.46% = record absolu) vs lr 3e-5 → 1.61%
+               # moyen (n=6, best 1.89%). A/B propre : v26 (1e-4) 2.46% → v29 (3e-5) 1.89%.
+               # Le passage à 3e-5 "façon symoon11" a été tenté puis ANNULÉ : leur LR va avec
+               # un WM 3.35× plus gros (181M vs 54M), il ne se transpose pas isolément.
 GRAD_CLIP_WM = 1000.0  # aligné symoon11 : clip quasi inactif (1.0 écrasait les gradients recon sommés sur 64x64x3 px)
 GRAD_CLIP_AC = 100.0   # aligné symoon11
 GRAD_CLIP = GRAD_CLIP_AC  # défaut générique (optim RND si activé)
@@ -156,12 +155,13 @@ Z_CATEGORIES = 32        # 32 variables catégorielles
 Z_CLASSES = 32           # × 32 classes → stochastique 32×32
 HIDDEN_DIM = 1024        # MLP units RSSM + reward/continue heads
 CNN_DEPTH = 32           # base channels CNN
-# Actor-Critic : MLP 5×1024 = symoon11 EXACT (policy.py hid_size=1024, num_layers=5, réf 17.65).
-# 5×1280 (notre invention) était dans le régime "narrow hyperparameter range" fragile de
-# DreamerV3 pour zéro bénéfice ; 1024 est le point prouvé stable. Le collapse de nos runs
-# 5×1280 venait du ratio 128 (critic lent), pas de la profondeur — cf. LR_AC.
-AC_HIDDEN_DIM = 1024     # largeur MLP actor/critic (symoon11)
-AC_NUM_LAYERS = 5        # profondeur (symoon11 : 5 couches)
+# Actor-Critic : MLP 3×1024 (config danijar Crafter) = celle de nos 2 meilleurs runs 65M
+# (v42 1.98%, v47 2.22%). Le passage à 5×1024 "façon symoon11" a été tenté puis ANNULÉ :
+# le seul point de données sur l'élargissement de l'actor est NÉGATIF (v26 actor 2×256 →
+# 2.46% record vs v41 actor 3×1024 → 1.61%), et H est piloté par la taille de l'actor
+# (v25 actor 2×256 → H=1.01 vs v46 actor 3×1024 → H=0.40, à ratio identique).
+AC_HIDDEN_DIM = 1024     # largeur MLP actor/critic (danijar)
+AC_NUM_LAYERS = 3        # profondeur (danijar : 3 couches)
 
 # KL loss DreamerV3
 FREE_BITS = 1.0
