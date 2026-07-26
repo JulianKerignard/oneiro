@@ -104,6 +104,16 @@ class CNNEncoder(nnx.Module):
         self.final_channels = c * 8          # 256
         flat_dim = self.final_channels * final_res * final_res  # 4096
 
+        # LayerNorm après CHAQUE conv (sur l'axe canaux, NHWC) — DreamerV3 canonique
+        # "norm partout" ; symoon11 (réf 17.65) fait pareil (flax_util norm_type="layer").
+        # Sans ça, l'échelle des activations dérive sur 4 convs non normalisées → le
+        # posterior sous-encode les petits détails (ex: le compteur d'inventaire, ~3×5 px
+        # sur 12288, soit ~0.1% de la recon sommée) dont dépend toute la chaîne de craft.
+        self.norm1 = nnx.LayerNorm(c, epsilon=1e-5, rngs=rngs)
+        self.norm2 = nnx.LayerNorm(c * 2, epsilon=1e-5, rngs=rngs)
+        self.norm3 = nnx.LayerNorm(c * 4, epsilon=1e-5, rngs=rngs)
+        self.norm4 = nnx.LayerNorm(c * 8, epsilon=1e-5, rngs=rngs)
+
         self.proj_linear = nnx.Linear(flat_dim, embed_dim, rngs=rngs)
         self.proj_norm = nnx.LayerNorm(embed_dim, epsilon=1e-5, rngs=rngs)
 
@@ -126,10 +136,14 @@ class CNNEncoder(nnx.Module):
         # NCHW → NHWC pour les convolutions JAX
         x = jnp.transpose(obs, (0, 2, 3, 1))   # (BT, H, W, C)
 
-        x = jax.nn.silu(self.conv1(x))
-        x = jax.nn.silu(self.conv2(x))
-        x = jax.nn.silu(self.conv3(x))
-        x = jax.nn.silu(self.conv4(x))
+        # Centrage [0,1] → [-0.5,0.5] (DreamerV3 canonique, symoon11 encoder.py:39).
+        # Entrée de moyenne 0 : sans ça la 1re conv voit un offset constant de +0.5.
+        x = x - 0.5
+
+        x = jax.nn.silu(self.norm1(self.conv1(x)))
+        x = jax.nn.silu(self.norm2(self.conv2(x)))
+        x = jax.nn.silu(self.norm3(self.conv3(x)))
+        x = jax.nn.silu(self.norm4(self.conv4(x)))
 
         # FIX parité PyTorch : transpose NHWC → NCHW avant flatten pour matcher
         # l'ordre des features que verra le proj_linear (PyTorch flatten est C-H-W,
