@@ -75,6 +75,14 @@ class CrafterEnv:
         # Tracking anti-spam (sleep/noop)
         self._consecutive_sleep = 0
         self._consecutive_noop = 0
+        # DIAGNOSTIC : max d'inventaire atteint dans l'épisode + tentatives par action.
+        # Le gate du craft est ARITHMÉTIQUE (data.yaml) : place_table coûte wood=2,
+        # make_wood_pickaxe wood=1+table, collect_stone exige la pioche → ≥3 bois.
+        # Or collect_wood ne donne +1 qu'UNE fois : les bois 2 et 3 ne rapportent RIEN.
+        # Sans ces compteurs, impossible de distinguer "n'essaie pas" / "essaie mais
+        # n'a pas les ressources" / "a les ressources mais l'action échoue".
+        self._inv_max = {}
+        self._action_counts = np.zeros(ACTION_DIM, dtype=np.int64)
 
     # ============================================================== gym API
 
@@ -88,6 +96,8 @@ class CrafterEnv:
         self._unlocked_this_episode = set()
         self._consecutive_sleep = 0
         self._consecutive_noop = 0
+        self._inv_max = {}
+        self._action_counts[:] = 0
         return self._normalize_obs(obs)
 
     def step(self, action):
@@ -95,6 +105,13 @@ class CrafterEnv:
         action_int = int(action)
         obs, reward, done, info = self._env.step(action_int)
         self._episode_step += 1
+
+        # DIAGNOSTIC : max d'inventaire vu + histogramme des actions tentées
+        if 0 <= action_int < ACTION_DIM:
+            self._action_counts[action_int] += 1
+        for item, qty in (info.get("inventory") or {}).items():
+            if qty > self._inv_max.get(item, 0):
+                self._inv_max[item] = int(qty)
 
         # Tracker les achievements DÉCROCHÉS pendant cet episode
         achievements = info.get("achievements", {})
@@ -162,6 +179,16 @@ class CrafterEnv:
     def unlocked_names(self):
         """Noms des achievements débloqués sur l'episode courant (copie)."""
         return set(self._unlocked_this_episode)
+
+    @property
+    def inv_max(self):
+        """Max d'inventaire atteint dans l'épisode courant (dict item → qty)."""
+        return dict(self._inv_max)
+
+    @property
+    def action_counts(self):
+        """Histogramme des actions tentées dans l'épisode courant (copie)."""
+        return self._action_counts.copy()
 
 
 __all__ = [

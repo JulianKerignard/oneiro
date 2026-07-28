@@ -49,7 +49,7 @@ from jax.sharding import NamedSharding, PartitionSpec as P, AxisType
 from flax import nnx
 import optax
 
-from crafter_dreamer.env import CrafterEnv, ACHIEVEMENTS
+from crafter_dreamer.env import CrafterEnv, ACHIEVEMENTS, ACTION_NAMES
 from src_jax.buffer import ImageReplayBufferJAX, ImageReplayBufferCPU
 from src_jax.model import (
     CNNEncoder, CNNDecoder, RSSM, RewardHead, ContinueHead,
@@ -1805,6 +1805,15 @@ def main():
     # Protocole Crafter officiel : compteurs sur les épisodes de TRAINING
     train_episode_count = 0
     train_ach_counts = {}
+    # DIAGNOSTIC comportemental (cumulé sur les épisodes de train) :
+    #   diag_wood_hist  : distribution du max de bois atteint par épisode (0..5+).
+    #     place_table coûte 2 bois, la pioche +1 → si la masse est sur 0-1, tout le
+    #     craft est ARITHMÉTIQUEMENT hors de portée, quel que soit le modèle.
+    #   diag_action_counts : histogramme des 17 actions réellement jouées → distingue
+    #     "n'essaie jamais l'action" de "l'essaie mais échoue".
+    diag_wood_hist = np.zeros(6, dtype=np.int64)
+    diag_action_counts = np.zeros(action_dim, dtype=np.int64)
+    diag_reached_stone = 0
 
     collected_rewards = []
     # RSSM state multi-env pour la collecte.
@@ -1947,6 +1956,13 @@ def main():
                     if done:
                         # Achievements de l'épisode AVANT le reset (score Crafter officiel)
                         ep_unlocked = sorted(env.unlocked_names)
+                        # DIAGNOSTIC comportemental : inventaire max atteint + actions
+                        # tentées, relevés AVANT le reset (sinon perdus).
+                        _inv = env.inv_max
+                        diag_wood_hist[min(_inv.get("wood", 0), 5)] += 1
+                        if _inv.get("stone", 0) > 0:
+                            diag_reached_stone += 1
+                        diag_action_counts += env.action_counts
                         next_obs = env.reset()
                     results.append((next_obs, r, done, ep_unlocked))
             prof.toc()
@@ -2308,6 +2324,32 @@ def main():
                 never = [a for a in ACHIEVEMENTS if train_ach_counts.get(a, 0) == 0]
                 print(f"      TRAIN ({len(train_ranked)}/{len(ACHIEVEMENTS)} sur {train_episode_count} eps): {train_str}")
                 print(f"      JAMAIS vus en train ({len(never)}) : {'  '.join(never) if never else '—'}")
+
+            # ---- DIAGNOSTIC COMPORTEMENTAL (le "pourquoi" du plafond)
+            # 1) BOIS : place_table coûte 2 bois, +1 pour la pioche → sans épisodes
+            #    à wood>=2, tout le craft est hors de portée par ARITHMÉTIQUE.
+            # 2) ACTIONS : une politique effondrée n'essaie que 2-3 actions sur 17 ;
+            #    les actions de craft ne sont alors JAMAIS tentées (≠ "mal apprises").
+            _nw = int(diag_wood_hist.sum())
+            if _nw > 0:
+                _pct = 100.0 / _nw
+                print(f"      BOIS/épisode (n={_nw}): "
+                      + "  ".join(f"{k}{'+' if k == 5 else ''}={diag_wood_hist[k] * _pct:.1f}%"
+                                  for k in range(6))
+                      + f"  | >=2 bois (table possible): {diag_wood_hist[2:].sum() * _pct:.1f}%"
+                      + f"  | >=3 (pioche): {diag_wood_hist[3:].sum() * _pct:.1f}%"
+                      + f"  | a eu de la pierre: {100.0 * diag_reached_stone / _nw:.2f}%")
+            _na = int(diag_action_counts.sum())
+            if _na > 0:
+                _order = np.argsort(-diag_action_counts)
+                _top = "  ".join(f"{ACTION_NAMES[i]}={100.0 * diag_action_counts[i] / _na:.1f}%"
+                                 for i in _order[:5])
+                _used = int((diag_action_counts > 0.01 * _na).sum())
+                _pt = diag_action_counts[ACTION_NAMES.index("place_table")]
+                _mp = diag_action_counts[ACTION_NAMES.index("make_wood_pickaxe")]
+                print(f"      ACTIONS top5: {_top}  | {_used}/17 actions >1%"
+                      f"  | place_table tenté {100.0 * _pt / _na:.2f}%"
+                      f"  | make_wood_pickaxe tenté {100.0 * _mp / _na:.2f}%")
 
             # ---- Auto-explore : détection de stagnation
             if args.auto_explore:
