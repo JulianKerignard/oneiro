@@ -1025,8 +1025,19 @@ def make_functional_train_steps(
     @partial(jax.jit, out_shardings=out_sh_act)
     def act_fn_functional(
         wm_state, ac_state,
-        prev_state, prev_actions_oh, obs_batch, key,
+        prev_state, prev_actions_oh, obs_batch, key, unimix=0.01,
     ):
+        """unimix : plancher d'exploration de la COLLECTE (jnp scalaire → pas de re-trace).
+
+        L'actor de DreamerV3 s'entraîne uniquement dans l'IMAGINATION, donc relever
+        l'unimix ici ne touche AUCUN gradient — c'est purement la politique de
+        comportement. Mesuré sur v50 : avec unimix=0.01 et une politique à 1.3 action
+        effective /17, `place_table` n'est tentée que 0.10% des steps (57× moins qu'un
+        agent random qui, lui, réussit 8% du temps) alors que l'agent A le bois requis
+        dans 6.7% des épisodes → zéro table sur 6236 épisodes → aucun gradient ne peut
+        jamais amorcer la chaîne de craft. Le schedule décroissant amorce tôt, puis
+        rend la main à la politique apprise (retour au canonique 0.01).
+        """
         wm_bundle_local, _opt_unused = nnx.merge(wm_graphdef, wm_state)
         ac_bundle_local, _opt_unused2 = nnx.merge(ac_graphdef, ac_state)
         encoder_l, rssm_l, _dec, _r, _c = wm_bundle_local
@@ -1036,7 +1047,7 @@ def make_functional_train_steps(
         emb = encoder_l(obs_batch)
         new_state, _, _ = rssm_l.observe_step(prev_state, prev_actions_oh, emb, k_obs)
         state_vec = jnp.concatenate([new_state["h"], new_state["z"]], axis=-1)
-        dist = actor_l.get_dist(state_vec, mask=None)
+        dist = actor_l.get_dist(state_vec, mask=None, unimix=unimix)
         actions_int = dist.sample(seed=k_act)
         return new_state, actions_int
 
@@ -1368,6 +1379,17 @@ def parse_args():
     p.add_argument("--batch_size", type=int, default=BATCH_SIZE)
     p.add_argument("--wm_train_per_iter", type=int, default=WM_TRAIN_PER_ITER)
     p.add_argument("--ac_train_per_iter", type=int, default=AC_TRAIN_PER_ITER)
+    p.add_argument("--unimix_init", type=float, default=0.01,
+                   help="Plancher d'exploration de la COLLECTE au début du run (défaut 0.01 "
+                        "= canonique DreamerV3). Relever (0.2-0.3) amorce les actions de craft "
+                        "jamais tentées : mesuré sur v50, place_table est tentée 0.10%% des "
+                        "steps (57x moins qu'un random qui réussit 8%%) alors que le bois requis "
+                        "est là dans 6.7%% des épisodes → 0 table sur 6236 ép. → rien à apprendre. "
+                        "N'affecte AUCUN gradient (l'actor s'entraîne dans l'imagination).")
+    p.add_argument("--unimix_final", type=float, default=0.01,
+                   help="Plancher d'exploration en fin de schedule (retour au canonique).")
+    p.add_argument("--unimix_decay_iters", type=int, default=0,
+                   help="Durée de la décroissance linéaire unimix_init → unimix_final. 0 = off.")
     p.add_argument("--ac_warmup_iters", type=int, default=0,
                    help="Gèle l'actor-critic pendant N itérations (le WM apprend seul, "
                         "collecte via l'actor uniforme). Protège du verrouillage de politique "
@@ -1922,6 +1944,15 @@ def main():
                 rnd_coef_effective = rnd_coef_runtime * max(0.0, 1.0 - (it - _w) / _span)
 
         # ============ (a) Collecte
+        # UNIMIX décroissant (exploration d'amorçage) : linéaire init → final sur
+        # unimix_decay_iters, puis constant. jnp scalaire → un seul trace jit.
+        if args.unimix_decay_iters > 0:
+            _frac = min(1.0, it / float(args.unimix_decay_iters))
+            _u = args.unimix_init + _frac * (args.unimix_final - args.unimix_init)
+        else:
+            _u = args.unimix_final
+        unimix_now = jnp.array(_u, dtype=jnp.float32)
+
         for _ in range(collect_per_iter):
             # --- act_fn (jit) : encode + observe RSSM + sample action
             # FIX 1 : version functional → utilise les states (params à jour)
@@ -1934,7 +1965,7 @@ def main():
             new_state, actions_int = act_fn_func(
                 wm_state, ac_state,
                 rssm_state_multi, prev_actions_oh_multi,
-                obs_batch_jax, subk,
+                obs_batch_jax, subk, unimix_now,
             )
             # Force materialize en numpy avant env.step (sync nécessaire car
             # actions_int doit être lu pour driver l'env Python).
@@ -2224,6 +2255,7 @@ def main():
                 f"p99={vals.get('img_rew_p99', 0):.2f} hi={100*vals.get('img_rew_frac_hi', 0):.2f}%) "
                 f"scale={vals.get('return_scale', 1.0):.2f} p5={float(return_ema_std[0]):.2f} p95={float(return_ema_std[1]):.2f}"
                 f"{alpha_tag}{ax_tag}{rnd_tag}{h_tgt_tag} | "
+                f"umix={float(_u):.3f} | "
                 f"r/step={history['env_reward_per_step'][-1]:.4f} | {ips:.1f} ips ETA {eta_tag}"
             )
 
