@@ -265,6 +265,50 @@ Chaque hypothèse :
 
 ## Hypothèses EN COURS DE TEST 🔄
 
+### H_313 — Le vrai goulot est la DURÉE DE VIE, et `rare_weight` l'écrase
+
+**Énoncé** : le plafond à ~3 achievements / crafter_score 2.2-2.5% n'est ni un problème
+de WM, ni d'archi, ni de critic : l'agent meurt de soif à ~180 steps, ce qui rend l'arbre
+de craft mécaniquement inatteignable. `REWARD_RARE_WEIGHT=10` en est la cause probable :
+il noie le signal de santé (±0.1) sous son propre leakage, donc la reward head
+n'apprend jamais à prédire la mort et l'actor n'a aucune raison de boire.
+
+**Origine** : audit 2026-07-29/30 des logs v42 / v47 / v50 / v51 (success rates par achievement).
+
+**Preuves mesurées** :
+- `length` = **169-205 steps, constant** sur 3 runs × 30k iter. Aucune progression, jamais.
+- `collect_drink` = 0-13% et **décroissant** ; `eat_plant` = 0% partout. L'agent ne boit pas.
+- `collect_wood` est MAXIMAL au début puis s'effondre : v42 52%→21%, v47 56%→19%,
+  v51 31%→5%. L'agent **désapprend** le bois (donc la compétence est atteignable :
+  ce n'est pas un manque de capacité mais un collapse vers un optimum local).
+- Conséquence en cascade : `place_table` 0-1% → `collect_stone` 0% → aucune table dans
+  le replay → le critic n'a aucun exemple de la valeur du bois → repli sur les 3 seuls
+  achievements sans prérequis (`collect_sapling` 100%, `wake_up` 99%, `place_plant` ~60%).
+- Budget de signal par step : perte de santé jusqu'à la mort ≈ 9 pts × 0.1 / 180 steps
+  = **-0.005/step**, contre un leakage mesuré `rew@0` = **+0.013/step**. Le biais de la
+  head est 2.6× plus grand que le signal de survie qu'elle doit apprendre.
+- Corrélation sur 22 runs : scale médian **2.63 sans** `rare_weight` vs **7.25 avec**
+  (×2.8 → advantages ÷2.8). Le record absolu du projet (v26, 2.46%) est **sans**.
+- Les critères de succès du fix v44 (`rew@0 ≤ 0.005`, `scale ≤ 5`) sont **ratés** :
+  réel 0.008-0.015 et 7.0-7.4.
+
+**Run de test** : v52-rareweight1 — `--rare_weight 1.0`, SEULE variable modifiée.
+Config identique à v50-wmfix-t1 (n_envs=4, batch=16, seq_len=64, train_ratio≈128,
+buffer CPU 1M, TPU v5e-8, 20k iter, eval tous les 2500). Pas d'unimix (l'échec de v51).
+
+**Statut** : 🔄 EN COURS
+
+**Critère de décision — la métrique primaire est `length`, pas les achievements** :
+- `length` > 250 → hypothèse VALIDÉE, l'arbre de craft s'ouvre mécaniquement ensuite.
+- `length` reste 180-200 → INVALIDÉE ; le suspect devient le poids relatif
+  santé/achievement dans la loss WM elle-même, pas `rare_weight`.
+- Indicateur avancé à suivre en parallèle : `collect_drink` (prédicteur direct de `length`).
+
+**Réserve** : la causalité `rare_weight` → non-survie est une INFÉRENCE (mécanisme +
+corrélation sur 22 runs), pas une mesure. Le run la falsifie en une variable.
+
+---
+
 ### H_201 — La combo v14 va débloquer l'actor
 
 **Énoncé** : Anti-spam OFF + entropy_coef 0.005 + adaptive_alpha ON + tous les fixes architecturaux devrait donner > 3 ach à iter 4000.
