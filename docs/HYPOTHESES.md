@@ -296,16 +296,61 @@ n'apprend jamais à prédire la mort et l'actor n'a aucune raison de boire.
 Config identique à v50-wmfix-t1 (n_envs=4, batch=16, seq_len=64, train_ratio≈128,
 buffer CPU 1M, TPU v5e-8, 20k iter, eval tous les 2500). Pas d'unimix (l'échec de v51).
 
-**Statut** : 🔄 EN COURS
+**Statut** : ✗ INVALIDÉE sur son critère — mais le remède marche pour une AUTRE raison
 
-**Critère de décision — la métrique primaire est `length`, pas les achievements** :
-- `length` > 250 → hypothèse VALIDÉE, l'arbre de craft s'ouvre mécaniquement ensuite.
-- `length` reste 180-200 → INVALIDÉE ; le suspect devient le poids relatif
-  santé/achievement dans la loss WM elle-même, pas `rare_weight`.
-- Indicateur avancé à suivre en parallèle : `collect_drink` (prédicteur direct de `length`).
+**Critère annoncé** : `length` > 250 → validée ; `length` reste 180-200 → invalidée.
 
-**Réserve** : la causalité `rare_weight` → non-survie est une INFÉRENCE (mécanisme +
-corrélation sur 22 runs), pas une mesure. Le run la falsifie en une variable.
+**Résultat v52 (20k iter)** : `length` = **181-194, inchangé**, alors même que
+`collect_drink` passe de 8% à **47%**. → Boire ne rallonge PAS la vie : le modèle causal
+« ne boit pas → meurt de soif → 180 steps → pas le temps de crafter » est **FAUX**.
+L'agent meurt d'autre chose (zombie/faim, non identifié). La durée de vie n'est pas le goulot.
+
+**MAIS `rare_weight=1.0` débloque massivement, à budget égal (20k iter) :**
+
+| | v50 (`rare_weight`=10) | **v52 (`rare_weight`=1)** |
+|---|---|---|
+| `collect_wood` max | 51% | **80%** ← record projet |
+| `place_table` max | 3% | **9%** (×3) |
+| `collect_drink` max | 1% | **47%** (×47) |
+| `crafter_score` max | 1.81% | **2.02%** |
+| best ach | ~3.2 @12.5k | **3.49 @7.5k** |
+
+**Les 2 critères du fix v44, ratés depuis v38, sont enfin atteints** :
+`rew@0` 0.013 → **0.002-0.003** (cible ≤0.005) et `scale` 7.5 → **1.9-2.2** (cible ≤5).
+
+**Conclusion** : le mécanisme réel est celui identifié en premier — leakage de la reward
+head → `scale` (P95−P5) gonflé ×3.75 → advantages écrasés d'autant → le PG ne consolide
+jamais un comportement coûteux (navigation vers un arbre, aller boire). Ce n'était pas
+une chaîne « survie → temps ». `rare_weight=1.0` doit devenir le défaut.
+
+**Contrepartie mesurée** : `rew@ach` passe de 0.74 à 0.54-0.62 (la head sous-prédit
+davantage les +1). Le `scale` sain compte donc plus que la précision de la reward head.
+Un `rare_weight` intermédiaire (2-3) reste à explorer.
+
+→ Ouvre **H_314** (l'effondrement post-pic est désormais LE problème central).
+
+---
+
+### H_314 — L'effondrement post-pic n'est ni le scale, ni le leakage, ni un H_collapse
+
+**Énoncé** : sur tous les runs, la compétence atteint un pic tôt puis se dégrade.
+v52 : `collect_wood` 80% @7.5k → 24% @20k, `place_table` 9% → 0%, `collect_drink`
+47% → 11%. Le pic de v52 arrive **40% plus tôt** que v50 (7.5k vs 12.5k) et plus haut.
+
+**Causes ÉLIMINÉES par v52** :
+- `scale` gonflé : stable à 1.9-2.2 pendant toute la dégradation. ✗
+- leakage reward head : `rew@0` stable à 0.002-0.003. ✗
+- collapse d'entropie : H stable à 0.63-0.65, **0% des logs sous 0.3** après 10k.
+  Les 39 warnings `H_collapse` sont TOUS à iter 0 (artefact de démarrage). ✗
+- wrap FIFO du buffer (H_312) : 20k × 32 = 640k transitions < capacité 1M. ✗
+
+**Statut** : 🔄 OUVERTE — cause inconnue, c'est le prochain sujet.
+
+**Note méthodo — le `crafter_score` masque le phénomène** : il est calculé sur les
+épisodes de training **cumulés depuis iter 0** (`train_ach_counts` jamais remis à zéro),
+donc il monte mécaniquement (1.79 → 2.02) pendant que la politique se dégrade. Inutilisable
+comme signal de progression en cours de run. Utiliser une fenêtre glissante, ou les
+success rates de l'EVAL.
 
 ---
 
