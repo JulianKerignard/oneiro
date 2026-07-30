@@ -314,14 +314,22 @@ def main():
         check(abs(float(loss_zero) - expected) < 1e-5,
               f"free_bits floor = β_dyn + β_rep = 0.6 : got {float(loss_zero):.4f}")
 
-        # Sanity check : avec free_bits=1.0 et KL aléatoire ~0.9 (< 1.0),
-        # le clamp doit kicker → gradient = 0 (bon comportement du free_bits)
+        # Sanity check du clamp free_bits. ATTENTION à la sémantique (fix H_009) :
+        # le free_bits s'applique à la KL SOMMÉE sur les Z_CAT catégories, pas par
+        # catégorie. Avec ces logits, KL/catégorie ≈ 0.88 → KL sommée ≈ 21 nats.
+        # Il faut donc un seuil > 21 pour que le clamp kicke réellement.
         small_post = jax.random.normal(jax.random.PRNGKey(62), (BATCH, SEQ, Z_CAT, Z_CLASSES))
         small_prior = jax.random.normal(jax.random.PRNGKey(63), (BATCH, SEQ, Z_CAT, Z_CLASSES))
-        grad_clamped = jax.grad(lambda p: RSSM.kl_loss(p, small_prior, free_bits=10.0))(small_post)
-        # Avec free_bits=10.0 > KL réelle, clamp → grad = 0 (sauf si KL > 10 par hasard)
-        max_grad_clamped = float(jnp.abs(grad_clamped).max())
-        check(max_grad_clamped == 0.0, f"free_bits clamp coupe le gradient : max|grad|={max_grad_clamped:.2e}")
+        grad_fn_clamp = jax.grad(lambda p, fb: RSSM.kl_loss(p, small_prior, free_bits=fb))
+
+        # free_bits=1000 >> KL sommée → clamp actif partout → gradient nul
+        g_clamped = float(jnp.abs(grad_fn_clamp(small_post, 1000.0)).max())
+        check(g_clamped == 0.0, f"free_bits >> KL : clamp coupe le gradient (max|grad|={g_clamped:.2e})")
+
+        # free_bits=10 < KL sommée (~21) → clamp INACTIF → gradient non nul.
+        # Ce cas échouait avant le fix H_009 (free_bits appliqué par catégorie).
+        g_free = float(jnp.abs(grad_fn_clamp(small_post, 10.0)).max())
+        check(g_free > 0.0, f"free_bits < KL sommée : gradient préservé (max|grad|={g_free:.2e})")
     except Exception as e:
         print(f"  [FAIL] kl_loss : {e}")
         import traceback; traceback.print_exc()

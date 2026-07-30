@@ -66,7 +66,7 @@ def build_notebook(args) -> dict:
         flags.append("--use_rnd")
     else:
         flags.append("--no_use_rnd")
-    if args.no_health_auto_stop:
+    if not args.health_auto_stop:
         flags.append("--no_health_auto_stop")
     if args.extra_args:
         flags.append(args.extra_args)
@@ -195,10 +195,14 @@ def main():
                     help="Cible TPU v5e-8 (jax[tpu], 1 core) au lieu de GPU P100.")
     pl.add_argument("--buffer-device", choices=["gpu", "cpu"], default="cpu")
     pl.add_argument("--buffer-capacity", type=int, default=1_000_000)
-    pl.add_argument("--no-use-rnd", action="store_true", default=True)
     pl.add_argument("--use-rnd", action="store_true", default=False,
                     help="Active RND (bonus d'exploration intrinseque). Defaut off.")
-    pl.add_argument("--no-health-auto-stop", action="store_true", default=True)
+    pl.add_argument("--no-use-rnd", dest="use_rnd", action="store_false",
+                    help="Desactive RND (defaut).")
+    pl.add_argument("--health-auto-stop", action="store_true", default=False,
+                    help="Active l'auto-stop du health monitor. Defaut off : les runs vont "
+                         "au bout meme en cas de warning persistant (on veut la trajectoire "
+                         "complete pour l'analyse).")
     pl.add_argument("--extra-args", type=str, default="")
     pl.add_argument("--resume-from-kernel", type=str, default=None,
                     help="Slug d'un kernel précédent : monte son output (kernel_sources) et "
