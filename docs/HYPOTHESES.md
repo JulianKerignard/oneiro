@@ -428,13 +428,52 @@ mécaniquement vers 4-5% *même avec 100%* sur les 9 restants. C'est un plafond 
 
 **Origine** : audit multi-agents 2026-07-30 (7 lentilles + réfutation adversariale).
 
+> ⚠️ **CORRECTION (vérification 2026-07-30)** — le chiffre « `make_wood_pickaxe` = 0% sur
+> 28 runs » est **FAUX**. Il vient de la lecture des lignes EVAL `unlocked (k/22)`, qui
+> échantillonnent 75 épisodes et affichent des pourcentages entiers : un événement à 0.06%
+> y apparaît nécessairement 0 fois. Les **compteurs TRAIN cumulés** donnent la vraie
+> mesure, sur 54 208 épisodes (11 runs instrumentés) :
+>
+> | | total | taux | conditionnel |
+> |---|---|---|---|
+> | `place_table` | **544** | 1.00% | — |
+> | `make_wood_pickaxe` | **31** | 0.057% | P(pioche \| table) = **5.7%** |
+> | `make_wood_sword` | **29** | 0.053% | — |
+> | `collect_stone` | **0** | 0.000% | P(pierre \| pioche) = **0/31** |
+>
+> Le mur n'est donc pas une impossibilité : c'est un **problème de taux**. La chaîne perd
+> ~20× à chaque maillon (1.00% → 0.057% → 0). 31 événements noyés dans ~640k transitions
+> ne peuvent rien entraîner, mais ils **existent dans le replay**. Le seul vrai zéro est
+> `collect_stone` — le mur dur est *après* la pioche.
+
+**Prérequis réels** (vérifiés dans `crafter/data.yaml`, jamais contrôlés avant) :
+`place_table` coûte **wood=2** ; `make_wood_pickaxe` coûte **wood=1** de plus et exige
+`nearby=[table]` ; `collect_stone` exige la pioche. Il faut donc **3 bois**, alors que
+l'achievement `collect_wood` ne paie qu'**une seule fois** : les bois #2 et #3 rapportent
+**exactement 0**.
+
 **Preuves mesurées** :
-- `make_wood_pickaxe` = **0%, 28 runs / 28** — 24 runs Kaggle (v23→v52) *et* les 4 runs
-  Modal pré-058beff (v19b/v20/v20b/v21). Jamais une seule pioche en bois en 2 ans de projet.
-- Également 0% partout : `collect_stone`, `place_stone`, `make_stone_pickaxe`,
-  `collect_coal`, `collect_iron`, `collect_diamond`, `make_wood_sword`, `make_stone_sword`,
-  `make_iron_sword`, `make_iron_pickaxe`, `place_furnace`, `eat_plant`.
-- v52, diagnostic cumulé sur 3478 épisodes : « **a eu de la pierre : 0.00%** ».
+- Histogramme du bois par épisode (v52, n=3478) : `0 bois=70.1% 1=19.6% 2=6.6% 3=2.0%
+  4=1.2% 5+=0.5%` → **≥3 bois (requis pour la pioche) = 3.7% des épisodes**.
+- **L'accumulation de bois EST apprise** (contre-mesure d'une hypothèse « collecte non
+  dirigée », réfutée) — baseline random 250 épisodes vs v52 :
+
+  | | ≥1 bois | ≥2 | ≥3 | P(≥3\|≥2) |
+  |---|---|---|---|---|
+  | random | 19.6% | 5.2% | 0.4% | **0.08** |
+  | v52 | 29.9% | 10.3% | 3.7% | **0.36** |
+
+  Une fois en « mode bois », l'agent continue 4.5× mieux qu'un random. Le goulot n'est pas
+  l'accumulation.
+- **Le goulot est le PREMIER maillon, celui qui est DIRECTEMENT récompensé** :
+  `collect_wood` = 29.9% contre 19.6% pour un random. Un +1 immédiat, une action atomique
+  à 1 step, et l'agent ne gagne que 10 points sur le hasard. C'est l'anomalie centrale —
+  et elle est expliquée par **H_317**.
+- Mort par **soif**, confirmée arithmétiquement (`crafter/objects.py:138-141`) :
+  `thirst += 1`/step, à >20 → `drink -= 1` ; `drink` part de 9 → **9 × 21 = 189 steps**.
+  Les longueurs observées (181-194) sont *exactement* cette échéance. La faim tue plus tard
+  (9 × 26 = 234). Boire une fois ne donne que **+21 steps** — d'où le +20 observé sur v52
+  quand `collect_drink` est passé de 8% à 47% sans que `length` bouge vraiment.
 - **Ce n'est PAS un problème d'exploration** : `make_wood_pickaxe` est *tentée* 1.58-2.30%
   des steps (≈3 fois par épisode), `place_table` 0.41-1.91%, et 16 actions sur 17 sont
   au-dessus de 1%. Les actions atomiques sont jouées ; **la séquence n'est jamais assemblée**.
@@ -515,6 +554,81 @@ vérification ci-dessus.
 cible est devenue identifiable, laisser tourner. `rew@ach` reste 0.6-0.7 → thèse morte,
 c'était un simple sous-apprentissage de classe rare (levier suivant : `W_REWARD` 1→10).
 Ne prédit **pas** le score : les blocages H_315-2 et H_315-3 ne sont pas touchés.
+
+**Note sur 058beff** : le commit était justifié par un argument de *cohérence* —
+l'entraînement fait `R_head(s_t) ≈ r(s_t,a_t)`, donc l'imagination doit prédire sur `s_t`.
+L'argument est valide en soi ; le problème est que la convention d'**entraînement** est
+elle-même la source du défaut. Le fix doit donc déplacer **les deux** (cible ET
+imagination), pas l'un sans l'autre. Une tentative de vérification de la convention de
+danijar via l'API GitHub est restée **ambiguë** (le résumé obtenu se contredit entre
+imagination et entraînement) → à trancher en lisant `agent.py` à la main avant de committer.
+
+---
+
+### H_317 — Le crédit est INVERSÉ sur l'action récompensée : la politique évite `do` précisément quand il paie
+
+**Énoncé** : ce n'est pas que le signal de crédit est faible ou bruité — il est **de signe
+opposé**. Sur les états où presser `do` rapporte immédiatement du bois (+1), la politique
+classe `do` **dernière des 17 actions**.
+
+**Mesure** [mesuré, `experiments/credit_assignment_probe.py`, checkpoint v50@35k, CPU 2 min] :
+on déroule la politique dans le vrai Crafter, on *fork* l'env à chaque step pour tester si
+`do` incrémenterait `wood`, puis on classe les 17 actions dans chaque état (même clé PRNG
+pour les 17, moyenne sur 4 clés).
+
+| groupe (n=78 chacun) | rang de `do` par `r+γV` | rang par **π** (actor seul) | `do` #1 |
+|---|---|---|---|
+| `do` **rapporte** du bois | **16.0**/17 | **17.0**/17 | **0%** |
+| contrôle : `do` ne rapporte rien | 4.0/17 | 3.0/17 | 38% |
+| *hasard* | *9.0* | *9.0* | *5.9%* |
+
+**Écart : −12 rangs (valeur), −14 rangs (politique).** Un système non informatif donnerait
+9/17 dans les deux groupes et un écart de 0. Ici la préférence est **anti-corrélée** avec
+le paiement.
+
+Le rang par **π** ne passe par *aucun* world model (fonction déterministe de `s_t` seul) :
+ce n'est donc pas un artefact de l'imagination ni de mon proxy à un pas. La politique
+apprise évite bel et bien la collecte de bois quand elle est à portée.
+
+**Mécanisme candidat — boucle de verrouillage, conséquence directe de H_316** :
+sous la convention sortante, l'optimum de la reward head est `E_a[r|s] = Σ_a π(a|s)·r(s,a)`
+— la **propension de la politique courante**, pas la valeur de l'état. D'où :
+
+```
+la politique presse "do" sur l'herbe (sapling 98.8%) et rarement près des arbres
+   -> R_head apprend « états-herbe = payants », « états-arbre = non payants »
+      -> V, entraînée sur des λ-returns bâties sur R_head, dévalue les états-arbre
+         -> la politique fuit encore plus les arbres
+```
+
+Auto-renforçant. Cela explique d'un seul mécanisme : (i) `collect_wood` bloqué à 29.9%
+alors qu'il est directement récompensé, (ii) l'inversion mesurée ci-dessus, (iii) la
+**commutation de modes** bois ↔ plant de H_314 (corr −0.85) — la cible de `R_head` suit la
+politique, donc le système est *bistable*, (iv) pourquoi `rare_weight` n'a rien changé : il
+repondère la CE, il ne rend pas la cible identifiable.
+
+**Statut** : 🔄 OUVERTE, mais c'est la piste la mieux étayée du projet — un effet mesuré à
+−14 rangs, pas une inférence.
+
+**Signature de succès** : relancer le probe sur un checkpoint post-fix H_316. L'écart de
+rang par π doit passer de **−14 à positif**. C'est un critère binaire, mesurable en 2 min
+sur CPU, sans attendre les achievements.
+
+**Réplication sur un 2ᵉ checkpoint indépendant** (v52@20k) — l'inversion tient, et sa
+**magnitude corrèle avec le comportement** :
+
+| checkpoint | écart de rang par π | écart par `r+γV` | `0 bois`/épisode |
+|---|---|---|---|
+| v50 @35k | **−14** | −12 | 75.9% (v51, même config) |
+| v52 @20k | **−4** | −8 | **70.1%** |
+
+Moins d'inversion → plus de bois collecté. Deux points seulement, mais dans le sens prédit
+par le mécanisme, et sur deux configs différentes. Le probe est reproductible en 2 min :
+`experiments/credit_assignment_probe.py --checkpoint <npz>`.
+
+**Réserve restante** : `r+γV` est un proxy à **un pas**, pas la λ-return sur horizon 16 sur
+laquelle l'actor est réellement entraîné. Le rang par **π**, lui, est sans réserve : c'est
+la politique elle-même.
 
 ---
 
