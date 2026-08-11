@@ -70,7 +70,8 @@ Légende : ✅ aligné · ⚠️ écart (capacité/réglage) · 🔴 bug identif
 | twohot bins | 255 | 255 | 255 | ✅ |
 | symlog / symexp | oui | oui | oui | ✅ |
 | return normalization | Percentile-EMA P5/P95, decay 0.99 | retnorm + advnorm | Percentile-EMA decay 0.99 | ✅ ~ (danijar a 2 niveaux) |
-| **reward/continue prédits sur** | `state` s_t (depuis 058beff) | **état APRÈS l'action** | ? (non revérifié) | 🔴 **RÉGRESSION** |
+| **reward prédite sur** | état d'**arrivée** + cible décalée (fix v53) | **état APRÈS l'action** | ? (non revérifié) | ✅ **corrigé** |
+| **continue prédite sur** | `state` s_t, cible non décalée | état d'arrivée (`is_terminal`) | ? | ⚠️ formulation ≠, math ✓ |
 | critic loss pondérée par le discount | non | **oui** (`sg(weight[:,:-1]) * value.loss(...)`) | ? | 🔴 écart |
 | bootstrap λ-return / baseline advantage | **fast critic** (H_309) | **slow critic** (`slowtar=True` par défaut) | ? | ⚠️ divergence assumée |
 

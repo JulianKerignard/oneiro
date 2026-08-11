@@ -426,13 +426,26 @@ def imagine_trajectory(
         new_state, _ = rssm.imagine_step(state, action_oh, subkey_r)
         new_state_vec = jnp.concatenate([new_state["h"], new_state["z"]], axis=-1)
 
-        # FIX BUG (plafond sous-Rainbow) : reward + continue prédits sur l'état de
-        # DÉPART state_vec (= s_t), PAS new_state_vec (s_{t+1}). La reward head est
-        # entraînée R_head(s_t) ≈ r(s_t,a_t) (reward SORTANT de s_t) ; la prédire sur
-        # new_state donnait r(s_{t+1},a_{t+1}) → reward décalé d'1 cran dans la λ-return
-        # → crédit temporel faussé → l'imagination guide vers le mauvais reward.
-        # Aligné danijar + symoon11 (reward évalué sur le MÊME état qu'à l'entraînement).
-        reward_pred = reward_head.predict(state_vec)
+        # REVERT de 058beff (vérifié verbatim sur danijar/dreamerv3@main, cf.
+        # docs/HYPERPARAMS_COMPARISON.md) : la reward est prédite sur l'état d'ARRIVÉE
+        # new_state_vec, celui que l'action vient de produire.
+        #
+        # danijar, rssm.py::imagine : `deter = self._core(carry['deter'], carry['stoch'],
+        # actemb)` PUIS `feat = dict(deter=deter, ...)` → feat[t] est l'état APRÈS
+        # action[t], et c'est sur feat que la reward head est appelée. La récompense
+        # immédiate de l'advantage dépend donc de l'action créditée.
+        #
+        # 058beff avait déplacé ce calcul sur state_vec pour « cohérence » avec la
+        # convention d'entraînement — mais c'est cette convention qui était fautive.
+        # Les deux moitiés bougent ensemble : cible décalée (ci-dessus, dans
+        # train_step_wm) + prédiction sur l'arrivée (ici). Avec les deux,
+        # rewards[t] = r(s_t, a_t) et adv[t] = r(s_t,a_t) + γV(s_{t+1}) − V(s_t)
+        # redevient le Bellman standard ; la λ-return d'Oneiro n'a besoin d'aucun
+        # slicing (sa récurrence est déjà non décalée, là où danijar décale en interne
+        # via `interm = rew[:, 1:]`).
+        reward_pred = reward_head.predict(new_state_vec)
+        # continue reste sur l'état de DÉPART : c_t = « continue après le step t »,
+        # aligné sur la récurrence R_t = r_t + γ·c_t·(...). Cf. train_step_wm.
         continue_logit = continue_head(state_vec)
         continue_pred = jax.nn.sigmoid(continue_logit)
 
@@ -530,8 +543,28 @@ def train_step_wm(
             free_bits=FREE_BITS, beta_dyn=BETA_DYN, beta_rep=BETA_REP,
         )
 
-        # Reward (twohot symlog CE, pondérée par REWARD_RARE_WEIGHT sur les reward != 0)
-        loss_reward = reward_head.loss(state_vec, rewards, rare_weight=REWARD_RARE_WEIGHT)
+        # Reward — convention ENTRANTE (alignée danijar, cf. H_316/H_317).
+        #
+        # L'index t porte la récompense reçue en ARRIVANT sur obs_t, soit rewards[t-1].
+        # POURQUOI : `state_vec[t]` est construit depuis obs_t et a_{t-1} (prev_action
+        # décalé, rssm.py:349-352) — il ne contient JAMAIS a_t. Sous la convention
+        # sortante (cible = r(obs_t, a_t)) la cible n'était donc pas une fonction de
+        # l'entrée : l'optimum de Bayes était Σ_a π(a|s)·r(s,a), la *propension de la
+        # politique courante*, quantité non stationnaire. Mesuré : la politique classait
+        # `do` 17e/17 sur les états où `do` rapporte du bois (contrôle : 3e/17).
+        # Avec la cible décalée, r(obs_{t-1}, a_{t-1}) est déterminée par (obs_t, a_{t-1}),
+        # tous deux dans l'état → cible identifiable.
+        #
+        # Le masque annule la frontière d'épisode : si dones[t-1]=1, obs_t est une obs de
+        # reset (l'env auto-reset à la collecte) et aucune récompense ne lui est imputable.
+        # observe_sequence remet déjà h/z/prev_action à zéro au même endroit.
+        def _shift_right(x):
+            return jnp.concatenate([jnp.zeros_like(x[:, :1]), x[:, :-1]], axis=1)
+
+        _not_episode_start = 1.0 - _shift_right(dones).astype(jnp.float32)
+        rewards_in = _shift_right(rewards) * _not_episode_start
+
+        loss_reward = reward_head.loss(state_vec, rewards_in, rare_weight=REWARD_RARE_WEIGHT)
         # Diagnostic (hors gradient) de la reward head, en 2 populations séparées.
         # Le seuil 0.01 mélangeait santé (±0.1, fréquente) et achievements (+1, rares) :
         # la moyenne noyait le signal. On isole donc les achievements à |r| > 0.5.
@@ -539,15 +572,24 @@ def train_step_wm(
         #                  cible avec fix ~0.7-1.0. C'est LE critère (indépendant du bruit d'éval).
         #   rew_pred_zero: prédiction sur les états à reward NUL. Doit rester ~0.
         #                  S'il monte → la head hallucine du reward (rare_weight trop fort).
+        # /!\ Les masques portent sur rewards_in (la cible réelle) : sur `rewards` ils
+        # décriraient une autre population que celle qu'on entraîne → rew@ach mentirait.
+        # NOTE : ce diagnostic reste IN-SAMPLE (calculé sur le batch qu'on fitte). Mesuré
+        # hors échantillon, rare_weight=10 et =1 donnent la même valeur (0.40) — ne pas
+        # lire rew@ach comme une capacité de généralisation.
         _rew_pred = reward_head.predict(state_vec)
-        _ach = (jnp.abs(rewards) > 0.5).astype(jnp.float32)
-        _zero = (jnp.abs(rewards) <= 0.01).astype(jnp.float32)
+        _ach = (jnp.abs(rewards_in) > 0.5).astype(jnp.float32)
+        _zero = (jnp.abs(rewards_in) <= 0.01).astype(jnp.float32)
         rew_pred_ach = (_rew_pred * _ach).sum() / jnp.maximum(_ach.sum(), 1.0)
-        rew_true_ach = (rewards * _ach).sum() / jnp.maximum(_ach.sum(), 1.0)
+        rew_true_ach = (rewards_in * _ach).sum() / jnp.maximum(_ach.sum(), 1.0)
         rew_pred_zero = (_rew_pred * _zero).sum() / jnp.maximum(_zero.sum(), 1.0)
         rew_n_ach = _ach.sum()
 
-        # Continue (BCE)
+        # Continue (BCE) — cible NON décalée, volontairement.
+        # continue_head(s_t) ≈ 1-dones[t] signifie « l'épisode continue après le step t »,
+        # ce qui est exactement le c_t de la récurrence λ-return
+        # (R_t = r_t + γ·c_t·(...)). Décaler cette cible désalignerait c_t d'un cran et
+        # casserait discount_cum. Seule la reward change de convention.
         continue_target = 1.0 - dones.astype(jnp.float32)
         loss_continue = continue_head.loss(state_vec, continue_target)
 

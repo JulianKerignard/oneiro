@@ -555,12 +555,38 @@ commit. La confusion venait du nom : le « state » de danijar est déjà post-a
 **Statut** : ✓ **VALIDÉE sur le plan de la correctness** (écart au paper prouvé, mécanisme
 prouvé par lecture de code). Reste à mesurer l'effet sur l'apprentissage → candidat n°1.
 
-**Test** : convention entrante (`_shift` de `rewards` ET `dones`, prédiction sur
-`new_state_vec`). **Gate à l'itération 2000** (~20 min de TPU, pas 3h) : le couple
-(`rew@ach` ≥ 0.90, `rew@0` ≤ 0.005) à `rare_weight=1` devient-il atteignable ? PASS → la
-cible est devenue identifiable, laisser tourner. `rew@ach` reste 0.6-0.7 → thèse morte,
-c'était un simple sous-apprentissage de classe rare (levier suivant : `W_REWARD` 1→10).
-Ne prédit **pas** le score : les blocages H_315-2 et H_315-3 ne sont pas touchés.
+**Fix IMPLÉMENTÉ (run v53)** — deux moitiés d'une seule convention, qui doivent bouger
+ensemble :
+1. `train_step_wm` : cible décalée `rewards_in[t] = rewards[t-1] × (1 − dones[t-1])`. Le
+   masque annule la frontière d'épisode (l'env auto-reset : si `dones[t-1]=1`, `obs_t` est
+   une obs de reset, aucune récompense imputable — `observe_sequence` y remet déjà h/z à 0).
+   Les diagnostics `_ach`/`_zero` passent sur `rewards_in`, sinon `rew@ach` décrirait une
+   autre population que celle entraînée.
+2. `imagine_trajectory` : `reward_pred = reward_head.predict(new_state_vec)` (revert 058beff).
+
+`continue` **ne bouge pas**, volontairement : `continue_head(s_t) ≈ 1−dones[t]` signifie
+« l'épisode continue après le step t », soit exactement le `c_t` de la récurrence
+`R_t = r_t + γ·c_t·(…)`. Décaler sa cible désalignerait `c_t` d'un cran et casserait
+`discount_cum`. La λ-return est donc inchangée.
+
+Vérifications avant lancement [mesuré] : sémantique du décalage validée sur un cas jouet
+(un `+1` au step 1 → imputé à t=2 ; une obs de reset → masquée à 0) ; et la reward imaginée
+**varie désormais avec l'action** (écart-type non nul sur les 17 actions à clé PRNG fixe,
+contre exactement 0 avant) — c'est-à-dire que le terme immédiat de l'advantage dépend enfin
+de l'action créditée. Les 4 suites de tests passent, smoke test OK.
+
+**Gates de décision, posés avant le run** :
+- **iter 2000** (~20 min) : le couple (`rew@ach` ≥ 0.90, `rew@0` ≤ 0.005) à `rare_weight=1`
+  devient-il atteignable ? PASS → la cible est devenue identifiable. `rew@ach` reste
+  0.6-0.7 → thèse morte, c'était un simple sous-apprentissage de classe rare (levier
+  suivant : `W_REWARD` 1→10).
+- **checkpoint, hors ligne, 2 min CPU** : `experiments/credit_assignment_probe.py` doit
+  faire passer l'écart de rang par π de **négatif à positif** (v50 : −14, v52 : −4). C'est
+  le critère le plus direct, et il ne dépend pas du bruit d'éval.
+- **iter 20000** : `≥2 bois` > 20 % soutenu, ou ≥1 `collect_stone`. Seul vrai succès.
+
+Ne prédit **pas** le score à lui seul : les blocages H_315-2 (champ de valeur au hasard) et
+H_315-3 (horizon réalisé 25 steps) ne sont pas touchés.
 
 **Note sur 058beff** : le commit était justifié par un argument de *cohérence* —
 l'entraînement fait `R_head(s_t) ≈ r(s_t,a_t)`, donc l'imagination doit prédire sur `s_t`.
