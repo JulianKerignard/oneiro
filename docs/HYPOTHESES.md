@@ -539,14 +539,21 @@ Signature cohérente : `wake_up` (non répétable) prédit 0.998-0.999 vs `colle
 (s_{t+1}) vers `state` (s_t), justifié par `docs/HYPERPARAMS_COMPARISON.md:73` qui
 affirme que danijar prédit sur `s_t`.
 
-⚠️ **NON VÉRIFIÉ** : la convention réelle de danijar/symoon11 n'a pas pu être contrôlée
-(repos de référence absents en local). Un agent affirme que danijar apparie `act[t]` avec
-`rew[t+1]`, ce qui ferait de 058beff une **régression** — à confirmer sur le repo officiel
-avant d'agir. Le reste de l'entrée (non-identifiabilité de la cible) ne dépend PAS de ce
-point : il est établi par lecture du code d'Oneiro seul.
+✅ **VÉRIFIÉ le 2026-07-30** sur `danijar/dreamerv3@main` (lecture verbatim de `rssm.py` et
+`agent.py`) : **058beff est bien une régression.** `rssm.py::imagine` applique l'action
+*avant* de construire `feat` (`deter = self._core(carry['deter'], carry['stoch'], actemb)`
+puis `feat = dict(deter=deter, ...)`) → **`feat[t]` est l'état APRÈS `action[t]`**, et
+`imag_loss` reçoit `self.rew(inp, 2).pred()` avec `inp = feat2tensor(imgfeat)`. La
+récompense immédiate de l'advantage **dépend donc de l'action créditée**. `lambda_return`
+compense l'indexation en interne (`interm = rew[:, 1:] + ...`) et `imag_loss` apparie
+`adv[t]` avec `logpi = logp(act)[:, :-1]`.
 
-**Statut** : 🔄 OUVERTE — candidat n°1 pour le prochain run, sous réserve de la
-vérification ci-dessus.
+L'entrée `docs/HYPERPARAMS_COMPARISON.md:73` qui affirmait « danijar prédit sur state s_t »
+et qui a justifié 058beff était **fausse** — corrigée, avec le verbatim, dans ce même
+commit. La confusion venait du nom : le « state » de danijar est déjà post-action.
+
+**Statut** : ✓ **VALIDÉE sur le plan de la correctness** (écart au paper prouvé, mécanisme
+prouvé par lecture de code). Reste à mesurer l'effet sur l'apprentissage → candidat n°1.
 
 **Test** : convention entrante (`_shift` de `rewards` ET `dones`, prédiction sur
 `new_state_vec`). **Gate à l'itération 2000** (~20 min de TPU, pas 3h) : le couple

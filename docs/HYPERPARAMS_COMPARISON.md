@@ -70,14 +70,69 @@ Légende : ✅ aligné · ⚠️ écart (capacité/réglage) · 🔴 bug identif
 | twohot bins | 255 | 255 | 255 | ✅ |
 | symlog / symexp | oui | oui | oui | ✅ |
 | return normalization | Percentile-EMA P5/P95, decay 0.99 | retnorm + advnorm | Percentile-EMA decay 0.99 | ✅ ~ (danijar a 2 niveaux) |
-| **reward/continue prédits sur** | **new_state s_{t+1}** ❌ → fix : `state` s_t | state s_t | state s_t | 🔴 **BUG (corrigé)** |
+| **reward/continue prédits sur** | `state` s_t (depuis 058beff) | **état APRÈS l'action** | ? (non revérifié) | 🔴 **RÉGRESSION** |
+| critic loss pondérée par le discount | non | **oui** (`sg(weight[:,:-1]) * value.loss(...)`) | ? | 🔴 écart |
+| bootstrap λ-return / baseline advantage | **fast critic** (H_309) | **slow critic** (`slowtar=True` par défaut) | ? | ⚠️ divergence assumée |
 
 ---
 
 ## Écarts notables (priorisés)
 
-1. 🔴 **BUG reward/continue — alignement temporel** *(trouvé, fix appliqué, en validation)*
-   La reward head est entraînée `R_head(s_t) ≈ r(s_t,a_t)` mais l'imagination la prédisait sur `s_{t+1}` → reward **décalé d'un cran** dans la λ-return → crédit temporel faussé → l'imagination guide vers le mauvais reward → **plateau sous Rainbow**. Les 2 réfs prédisent sur le même état qu'à l'entraînement. Fix : prédire sur `state_vec`. Illustration de *"parité numérique ≠ correctness"* (la baseline PyTorch avait le bug, reproduit fidèlement en JAX).
+1. 🔴 **RÉGRESSION reward/continue — alignement temporel** *(vérifié verbatim sur
+   `danijar/dreamerv3@main` le 2026-07-30 ; l'entrée précédente de ce tableau était FAUSSE
+   et a justifié le commit `058beff`)*
+
+   Ce que fait réellement danijar, `rssm.py::imagine` :
+   ```python
+   action = policy(sg(carry))                                  # action tirée de l'état courant
+   deter  = self._core(carry['deter'], carry['stoch'], actemb) # on APPLIQUE l'action
+   feat   = dict(deter=deter, stoch=stoch, logit=logit)        # feat[t] = état APRÈS action[t]
+   ```
+   puis `agent.py` : `imag_loss(imgact, self.rew(inp, 2).pred(), ...)` avec
+   `inp = feat2tensor(imgfeat)`. Donc **`rew[t] = R_head(état produit PAR l'action)`** — la
+   récompense immédiate de l'advantage *dépend* de l'action créditée.
+
+   `lambda_return` compense l'indexation en interne :
+   ```python
+   interm = rew[:, 1:] + (1 - cont) * live * boot[:, 1:]
+   ```
+   et `imag_loss` apparie `adv[t] = ret[t] - tarval[:, :-1][t]` avec
+   `logpi = logp(act)[:, :-1][t]`. L'action créditée et la récompense qu'elle produit sont
+   du même côté. (Le nom de variable `imgprevact` au site d'appel confirme que les actions
+   rendues par `imagine` sont « précédentes » relativement aux `feat`.)
+
+   Oneiro, lui, calcule `reward_pred = reward_head.predict(state_vec)` **avant** le sample
+   de l'action (train_dreamer_jax.py:435 vs 419), et sa `compute_lambda_returns` n'applique
+   **aucun** décalage. Résultat : le terme immédiat de l'advantage est une **constante**
+   vis-à-vis de l'action créditée → il se simplifie → **aucun crédit du premier ordre**.
+   Effet mesuré : cf. `docs/HYPOTHESES.md` **H_317** (crédit inversé, −14 rangs).
+
+   Le fix demande **deux** changements cohérents, pas un :
+   - imagination : prédire sur `new_state_vec` (revert de 058beff) ;
+   - entraînement WM : convention **entrante** — décaler la cible `rewards` **et** `dones`
+     d'un cran, sinon la cible reste non identifiable (`state_vec[t]` contient `a_{t-1}`,
+     jamais `a_t`, cf. rssm.py:349-352).
+
+   Avec les deux, `adv[t] = r(s_t,a_t) + γV(s_{t+1}) − V(s_t)` redevient le Bellman standard
+   et la λ-return d'Oneiro n'a besoin d'**aucun** slicing (son récurrence est déjà non
+   décalée, là où danijar décale en interne — les deux formulations deviennent équivalentes).
+
+2. 🔴 **Critic loss non pondérée par le discount** *(vérifié verbatim)* — danijar applique le
+   même `weight` aux deux pertes :
+   ```python
+   policy_loss     = sg(weight[:, :-1]) * -(logpi * sg(adv_normed) + actent * sum(ents))
+   losses['value'] = sg(weight[:, :-1]) * (value.loss(...) + slowreg * value.loss(...))[:, :-1]
+   ```
+   Oneiro pondère l'actor (`discount_cum`) mais **pas** le critic (`critic.loss(...)` en
+   moyenne uniforme, l.713). L'état t=15 de l'imagination — issu de 15 rollouts de prior
+   successifs, donc le moins fiable — pèse donc autant que t=0 dans l'entraînement du critic.
+
+3. ⚠️ **Bootstrap : fast vs slow critic** *(vérifié verbatim)* — danijar :
+   `tarval = slowval if slowtar else val`, avec `slowtar=True` par **défaut** ; `tarval` sert
+   à la fois au bootstrap de la λ-return et de baseline à l'advantage. Oneiro a délibérément
+   basculé sur le **fast** critic (H_309), motivé par le « pic 4.0 puis oscillations » de v18
+   — or **H_314 a montré que cette lecture pic-puis-oscillation est un artefact**. La
+   justification de H_309 tombe donc, et l'écart au paper reste. À re-tester.
 
 2. ⚠️ **Capacité** : deter (1280/2048 vs 4096/8192), stochastique, profondeur actor-critic. Notre 14M ↔ ~200M des réfs. → plafond de score, mais **pas la cause du "sous-Rainbow"** (un 14M correct bat Rainbow).
 
