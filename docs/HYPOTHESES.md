@@ -292,6 +292,32 @@ n'apprend jamais à prédire la mort et l'actor n'a aucune raison de boire.
 - Les critères de succès du fix v44 (`rew@0 ≤ 0.005`, `scale ≤ 5`) sont **ratés** :
   réel 0.008-0.015 et 7.0-7.4.
 
+> ⚠️ **RECTIFICATIF (audit multi-agents 2026-07-30, 15 agents, 511 vérifications)** —
+> plusieurs preuves de cette entrée et de H_314 ci-dessous sont **fausses**. Lire
+> **H_315** avant de s'appuyer sur quoi que ce soit d'écrit ici. En résumé :
+> - **v52 n'est PAS une expérience mono-variable.** Header du log : v42/v47/v50/v51 ont
+>   `ac_train/iter=4`, **v52 a `ac_train/iter=1`**. Le launcher Kaggle n'expose pas
+>   `--ac_train_per_iter` et le défaut du fichier est 1 ; les runs précédents le passaient
+>   via `--extra-args`, pas v52. Le replay ratio de l'AC a donc été divisé par 4 **en même
+>   temps** que `rare_weight`. Deux variables. Toute conclusion causale ci-dessous est
+>   confondue. [mesuré]
+> - **v52 n'est pas le meilleur run du projet.** À itération appariée (20k), sur la
+>   métrique d'éval `achievements` : v52 = **2.88 dernier / 3.49 best**, v50 = **3.77 /
+>   3.77**, v47 = **3.55 / 3.55**. v52 est *moins bon*. La comparaison qui concluait
+>   l'inverse portait sur les success rates individuels (wood/drink/table) en ignorant
+>   la substitution avec `place_plant`. [mesuré]
+> - **`rew@ach` est mesuré IN-SAMPLE** — sur le batch même qu'on est en train de fitter
+>   (l.543-548). Hors échantillon, sur transitions on-policy fraîches, les deux heads
+>   valent **0.40** : v50 (`rare_weight`=10) affiche 0.80 → réel 0.40 ; v52 (=1) affiche
+>   0.58 → réel 0.40. Les critères « atteints » l'étaient sur le mauvais échantillon,
+>   et les deux réglages généralisent identiquement. [mesuré]
+> - **`rew@0` n'est pas un offset uniforme** : médiane +0.0014, moyenne +0.057, sd 0.135,
+>   **19.5%** des états > 0.05. C'est un champ *localisé* — il ne se simplifie pas dans
+>   l'advantage. L'argument « biais constant » est faux dans les deux sens. [mesuré]
+>
+> Ce qui **reste vrai** : `length` est bien plat (181-194), la survie n'est pas le goulot,
+> et `collect_drink` a bien progressé 8% → 47% sur v52 sans allonger la vie.
+
 **Run de test** : v52-rareweight1 — `--rare_weight 1.0`, SEULE variable modifiée.
 Config identique à v50-wmfix-t1 (n_envs=4, batch=16, seq_len=64, train_ratio≈128,
 buffer CPU 1M, TPU v5e-8, 20k iter, eval tous les 2500). Pas d'unimix (l'échec de v51).
@@ -344,13 +370,151 @@ v52 : `collect_wood` 80% @7.5k → 24% @20k, `place_table` 9% → 0%, `collect_d
   Les 39 warnings `H_collapse` sont TOUS à iter 0 (artefact de démarrage). ✗
 - wrap FIFO du buffer (H_312) : 20k × 32 = 640k transitions < capacité 1M. ✗
 
-**Statut** : 🔄 OUVERTE — cause inconnue, c'est le prochain sujet.
+**Statut** : ✗ **INVALIDÉE** (audit multi-agents 2026-07-30) — le phénomène n'existe pas.
 
-**Note méthodo — le `crafter_score` masque le phénomène** : il est calculé sur les
-épisodes de training **cumulés depuis iter 0** (`train_ach_counts` jamais remis à zéro),
-donc il monte mécaniquement (1.79 → 2.02) pendant que la politique se dégrade. Inutilisable
-comme signal de progression en cours de run. Utiliser une fenêtre glissante, ou les
-success rates de l'EVAL.
+**Réfutation** [mesuré, 2 métriques indépendantes] :
+- **Test de permutation** sur les 18 runs à ≥6 evals : l'écart `max − dernier` observé vaut
+  **0.398**, contre **0.654** pour le null « aucune tendance » (mêmes valeurs, ordre permuté).
+  L'observé est *plus petit* que ce que la seule sélection du maximum prédit — dans 14/18
+  runs. Sign test **p = 0.015 CONTRE** l'hypothèse. Pentes OLS post-warmup : **12/18
+  positives**.
+- Métrique indépendante à 6× plus d'échantillons (compteurs `train_ach_counts`
+  différenciés entre evals, ~430 ép./fenêtre au lieu de 75) : gap 0.137 vs null 0.531,
+  7/8 runs, p = 0.035.
+- **v42/v43/v44/v47 terminent exactement à leur maximum.** La dernière eval de v47 (4.21
+  @30k) est son max absolu et le meilleur chiffre du projet.
+- Les repères « pics @12.5k » de l'énoncé sont faux : v42 pique @27.5k, v47 @30k, v50 @25k.
+- L'artefact : lire « best-so-far vs dernier point » sur une série échantillonnée (tous les
+  2500 iter) beaucoup plus lentement que le churn réel de la politique produit
+  mécaniquement un « drop » dans ~54% des points d'arrêt possibles.
+
+**Ce qui EST réel : une substitution sélective, à total conservé.** Sur v52, compteurs
+TRAIN différenciés (~435 ép./fenêtre, erreur binomiale ~2.4 pts) :
+
+| fenêtre | wood | drink | table | plant |
+|---|---|---|---|---|
+| [7500,10000] | 62.8% | 51.5% | 9.0% | 11.0% |
+| [17500,20000] | 19.4% | 18.7% | 1.6% | **68.2%** |
+
+Le total `ach/ep` reste plat (2.70 → 3.16) **par substitution**. En éval :
+corr(wood, plant) = **−0.85**, corr(wood, drink) = **+0.93**. L'éval étant déterministe
+(mondes 10 000+ep, clés 20 000+ep, argmax), ce n'est pas du bruit d'échantillonnage : la
+politique **commute** entre deux modes mutuellement exclusifs.
+
+**Cause de la commutation : NON IDENTIFIÉE.** Aucune signature intermédiaire n'est
+mesurable sur v52 10k→20k : `imgR hi` 1.18→1.08%, `img ret` plat, `H` 0.63-0.65, `scale`
+monotone −11%, `rew@ach` plat, densité d'achievements dans le batch en **hausse**
+(1.6→2.0%). Question ouverte (a) — pourquoi ces modes ne se cumulent pas alors qu'ils
+tiennent tous dans 185 steps.
+
+→ La vraie question n'est ni H_313 ni H_314 : voir **H_315**.
+
+**Note méthodo — le `crafter_score` affiché est cumulé depuis l'itération 0**
+(`train_ach_counts` init l.1828-1829, jamais remis à zéro, consommé l.2315). Il ne peut
+structurellement **pas** baisser : ce n'est ni une preuve ni une contre-preuve de quoi que
+ce soit en cours de run. Idem pour tous les diagnostics comportementaux (`ACTIONS top5`,
+`BOIS/épisode`) : écarts mesurés jusqu'à **×22** entre cumulé et fenêtré (`place_table
+tentée` 3.28% cumulé vs 0.48% fenêtré sur v51). Utiliser les deltas entre evals.
+
+---
+
+### H_315 — Le plafond est un MUR DE CONJONCTION à la profondeur 2, pas un défaut d'optimisation
+
+**Énoncé** : le plateau à 2.0-2.5% n'est pas causé par une instabilité, une dégradation ou
+un mauvais réglage. **13 achievements sur 22 sont à exactement 0% sur les 28 runs de
+l'histoire du projet**, les deux ères confondues. La moyenne géométrique plafonne alors
+mécaniquement vers 4-5% *même avec 100%* sur les 9 restants. C'est un plafond de
+**composition**, pas d'*optimisation*.
+
+**Origine** : audit multi-agents 2026-07-30 (7 lentilles + réfutation adversariale).
+
+**Preuves mesurées** :
+- `make_wood_pickaxe` = **0%, 28 runs / 28** — 24 runs Kaggle (v23→v52) *et* les 4 runs
+  Modal pré-058beff (v19b/v20/v20b/v21). Jamais une seule pioche en bois en 2 ans de projet.
+- Également 0% partout : `collect_stone`, `place_stone`, `make_stone_pickaxe`,
+  `collect_coal`, `collect_iron`, `collect_diamond`, `make_wood_sword`, `make_stone_sword`,
+  `make_iron_sword`, `make_iron_pickaxe`, `place_furnace`, `eat_plant`.
+- v52, diagnostic cumulé sur 3478 épisodes : « **a eu de la pierre : 0.00%** ».
+- **Ce n'est PAS un problème d'exploration** : `make_wood_pickaxe` est *tentée* 1.58-2.30%
+  des steps (≈3 fois par épisode), `place_table` 0.41-1.91%, et 16 actions sur 17 sont
+  au-dessus de 1%. Les actions atomiques sont jouées ; **la séquence n'est jamais assemblée**.
+- Le goulot chiffré : `≥2 bois dans un épisode` = 4.9-12.8%, et
+  **`P(place_table | ≥2 bois)` = 0.255 STABLE sur tout le run** (0.194/0.310/0.250/0.255/
+  0.148/0.358/0.267). Ce n'est donc pas le craft qui est désappris — c'est l'accumulation
+  de la **2ᵉ bûche** qui n'arrive jamais.
+- Le mur préexiste au commit 058beff : `place_table` atteignait 20% en v21 (mais sur
+  `EVAL_EPISODES`=10, soit 2 épisodes → non significatif), `make_wood_pickaxe` 0% déjà.
+
+**Mécanisme candidat** (3 blocages, tous mesurés, tous non traités) :
+1. **La 2ᵉ bûche rapporte exactement 0** (Crafter paie chaque achievement une fois par
+   épisode, `env.py:119-120`). Le pont `bois#2 → table` repose donc *entièrement* sur `V`.
+2. **Le champ de reward ne classe rien.** AUC de `R(s)` sur les états à reward nul pour
+   prédire « un +1 dans les 8 steps suivants » = **0.518 [0.487, 0.552]** (v50 sur sa
+   propre distribution) — indiscernable du hasard. Utilisable exigerait > 0.7.
+   [mesuré : micro-test apparié 2 politiques × 2 WM, checkpoints v50@35k et v52@20k,
+   2304 steps on-policy, 6 seeds]
+3. **L'horizon de valeur réalisé ≈ 25 steps, pas 119.** Identité au point fixe
+   `E[V] = E[r]/(1−γc)` sur les deux termes déjà loggés : v52 → **25.75** contre un
+   nominal `1/(1−0.997×0.9946)` = 119. [mesuré, 201 lignes]
+
+**Statut** : 🔄 OUVERTE — c'est LA question du projet. Question (b) : pourquoi la
+conjonction `2 bois + table + position + make` n'est jamais assemblée en 28 runs alors que
+chaque action atomique est jouée 1.6-2.3% des steps.
+
+---
+
+### H_316 — La cible de la reward head n'est pas une fonction de son entrée (convention sortante)
+
+**Énoncé** : `rewards[t] = r(obs_t, a_t)` (convention **sortante**) est prédit depuis
+`state_vec[t]`, qui contient `a_{t-1}` mais **jamais** `a_t`. La cible n'est donc pas une
+fonction de l'entrée : l'optimum de Bayes est `Σ_a π(a|s)·r(s,a)`, une quantité
+**policy-dependante et non stationnaire**. La head n'apprend pas `r(s)`, elle apprend la
+propension de la politique courante.
+
+**Chaîne vérifiée** [code-read, confirmée ligne à ligne] :
+- `buffer.add(obs_list[i], a, r_final, ...)` — train_dreamer_jax.py:2036 → même index
+- `prev_act_T = concat([0, act_T[:-1]])` — rssm.py:349-352 → `s_t` ne voit pas `a_t`
+- `loss_reward = reward_head.loss(state_vec, rewards)` — l.534
+- `reward_pred = reward_head.predict(state_vec)` — l.435, soit **avant** le sample de
+  l'action (l.419) dans l'imagination
+
+**Conséquence sur le PG** : dans `compute_lambda_returns`, `rewards[t]` est littéralement
+indépendant de `a_t` → il se simplifie dans `A_t = returns[t] − V(s_t)`. Le seul terme qui
+classe les actions est `γ·c_t·V(s_{t+1})` — exactement la quantité mesurée **au hasard**
+(AUC 0.518, cf. H_315-2). L'actor ne reçoit **aucun crédit du premier ordre** pour l'action
+qui déclenche le +1. C'est précisément ce qui manque pour l'**acte terminal d'une chaîne**
+(`place_table` quand on a 2 bois).
+
+**Corollaire** : le couple de critères exigé par le projet (`rew@ach ≥ 0.9` ET
+`rew@0 ≤ 0.005`) est **mathématiquement insatisfiable** sous cette convention — mesuré
+w=10 → (0.82 ; +0.029), w=1 → (0.58 ; +0.003). Le dilemme n'est pas un mauvais réglage,
+c'est la non-identifiabilité de la cible.
+
+**Second facteur, indépendant** : `observe_sequence` sans `initial_state` (l.513,
+rssm.py:325-326) remet `h=z=0` tous les 64 steps, `start` uniforme (buffer.py:620-623) →
+le modèle ne peut pas savoir qu'un achievement a déjà été décroché dans l'épisode.
+Signature cohérente : `wake_up` (non répétable) prédit 0.998-0.999 vs `collect_sapling`
+(répétable) ~0.006-0.10.
+
+**Origine** : le commit **058beff** (2026-06-22) a déplacé la prédiction de `new_state`
+(s_{t+1}) vers `state` (s_t), justifié par `docs/HYPERPARAMS_COMPARISON.md:73` qui
+affirme que danijar prédit sur `s_t`.
+
+⚠️ **NON VÉRIFIÉ** : la convention réelle de danijar/symoon11 n'a pas pu être contrôlée
+(repos de référence absents en local). Un agent affirme que danijar apparie `act[t]` avec
+`rew[t+1]`, ce qui ferait de 058beff une **régression** — à confirmer sur le repo officiel
+avant d'agir. Le reste de l'entrée (non-identifiabilité de la cible) ne dépend PAS de ce
+point : il est établi par lecture du code d'Oneiro seul.
+
+**Statut** : 🔄 OUVERTE — candidat n°1 pour le prochain run, sous réserve de la
+vérification ci-dessus.
+
+**Test** : convention entrante (`_shift` de `rewards` ET `dones`, prédiction sur
+`new_state_vec`). **Gate à l'itération 2000** (~20 min de TPU, pas 3h) : le couple
+(`rew@ach` ≥ 0.90, `rew@0` ≤ 0.005) à `rare_weight=1` devient-il atteignable ? PASS → la
+cible est devenue identifiable, laisser tourner. `rew@ach` reste 0.6-0.7 → thèse morte,
+c'était un simple sous-apprentissage de classe rare (levier suivant : `W_REWARD` 1→10).
+Ne prédit **pas** le score : les blocages H_315-2 et H_315-3 ne sont pas touchés.
 
 ---
 
