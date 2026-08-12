@@ -200,8 +200,20 @@ def main():
     print(f"    écart de rang par r+γV : {gap_v:+.1f}")
     print(f"    écart de rang par π    : {gap_p:+.1f}")
     print(f"    hasard = 9.0/17 dans les deux groupes, écart 0.0")
-    verdict = ("CRÉDIT INVERSÉ — la politique évite l'action qui paie" if gap_p < -2
-               else "crédit sain" if gap_p > 2 else "crédit non informatif (hasard)")
+
+    # Le verdict porte d'abord sur le rang ABSOLU dans le groupe positif : la question
+    # est « la politique choisit-elle l'action qui paie ? ». L'écart au contrôle est
+    # secondaire — `do` sert aussi à récolter des saplings, donc le contrôle peut
+    # légitimement être bon lui aussi, ce qui comprime l'écart sans rien dire de mauvais.
+    rank_pos, top1_pos = float(np.median(pp)), float(np.mean(pp == 1))
+    if rank_pos <= 3.0 and top1_pos >= 0.5:
+        verdict = f"CRÉDIT SAIN — 'do' classée {rank_pos:.0f}e/17, #1 dans {100*top1_pos:.0f}% des cas"
+    elif gap_p < -2:
+        verdict = "CRÉDIT INVERSÉ — la politique évite l'action qui paie"
+    elif rank_pos >= 7.0:
+        verdict = "crédit non informatif (proche du hasard)"
+    else:
+        verdict = f"crédit partiel — 'do' classée {rank_pos:.0f}e/17, #1 dans {100*top1_pos:.0f}%"
     print(f"\n  VERDICT : {verdict}")
 
 

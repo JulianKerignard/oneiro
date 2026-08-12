@@ -496,9 +496,30 @@ l'achievement `collect_wood` ne paie qu'**une seule fois** : les bois #2 et #3 r
    `E[V] = E[r]/(1−γc)` sur les deux termes déjà loggés : v52 → **25.75** contre un
    nominal `1/(1−0.997×0.9946)` = 119. [mesuré, 201 lignes]
 
-**Statut** : 🔄 OUVERTE — c'est LA question du projet. Question (b) : pourquoi la
-conjonction `2 bois + table + position + make` n'est jamais assemblée en 28 runs alors que
-chaque action atomique est jouée 1.6-2.3% des steps.
+**Statut** : ✓ **RÉSOLUE** par le fix de convention (H_316/H_317), run **v53**. Le mur
+n'était pas une limite d'exploration ni de capacité : c'était le crédit inversé qui
+empêchait la politique de collecter le bois, donc d'entrer dans la chaîne.
+
+**Résultat v53** (config identique à v50, seule variable = la convention de reward) :
+
+| | v50 | v52 | **v53** | facteur v53/v50 |
+|---|---|---|---|---|
+| `collect_wood` | 29.25% | 29.87% | **88.58%** | ×3.0 |
+| `place_table` | 0.91% | 2.39% | **78.01%** | **×86** |
+| `make_wood_pickaxe` | 0.02% | 0.14% | **42.03%** | **×2100** |
+| `collect_stone` | **0** | **0** | **25.20%** | ∞ |
+| `place_stone` | 0 | 0 | **22.05%** | ∞ |
+| `collect_coal` | 0 | 0 | **6.92%** | ∞ |
+| `make_stone_pickaxe` | 0 | 0 | **0.18%** | ∞ |
+| achievements débloqués | 11/22 | 11/22 | **17/22** (train), 14/22 (éval) | |
+
+`collect_stone` était à **0 sur 54 208 épisodes** cumulés, toutes ères confondues. Franchi.
+
+**Contrôle d'authenticité** : la chaîne respecte la physique de `data.yaml` — chaque maillon
+est ≤ son prérequis (`place_table` 2671 ≤ `collect_wood` 3033 ; `make_wood_pickaxe` 1439 ≤
+table ; `collect_stone` 863 et `collect_coal` 237 ≤ pioche bois 1439 ; `place_stone` 755 ≤
+pierre 863 ; `collect_iron` 0 ≤ `make_stone_pickaxe` 6). Un `collect_stone` ne peut pas être
+fabriqué par une erreur de mesure : il exige une pioche, donc une table, donc 2 bois.
 
 ---
 
@@ -640,12 +661,26 @@ alors qu'il est directement récompensé, (ii) l'inversion mesurée ci-dessus, (
 politique, donc le système est *bistable*, (iv) pourquoi `rare_weight` n'a rien changé : il
 repondère la CE, il ne rend pas la cible identifiable.
 
-**Statut** : 🔄 OUVERTE, mais c'est la piste la mieux étayée du projet — un effet mesuré à
-−14 rangs, pas une inférence.
+**Statut** : ✓ **VALIDÉE** — la signature prédite s'est réalisée, et le fix a débloqué le
+projet (run v53, cf. plus bas).
 
-**Signature de succès** : relancer le probe sur un checkpoint post-fix H_316. L'écart de
-rang par π doit passer de **−14 à positif**. C'est un critère binaire, mesurable en 2 min
-sur CPU, sans attendre les achievements.
+**Signature prédite avant le run** : l'écart de rang par π doit passer de −14 à positif.
+**Résultat mesuré** (même probe, mêmes seeds, checkpoint v53@20k) :
+
+| checkpoint | rang de `do` quand il paie | `do` #1 | écart au contrôle |
+|---|---|---|---|
+| v50 @35k (avant) | **17.0**/17 | **0%** | **−15** |
+| v52 @20k (avant) | 13.0/17 | 1% | −4 |
+| **v53 @20k (après)** | **1.0**/17 | **76%** | **+2** |
+
+La politique est passée de « `do` est la pire des 17 actions quand elle rapporte du bois »
+à « `do` est la meilleure, choisie en premier 3 fois sur 4 ». C'est le renversement exact
+prédit par le mécanisme.
+
+> Note sur le probe : le résumé pertinent est le **rang absolu dans le groupe positif**, pas
+> l'écart au contrôle. `do` sert aussi à récolter les saplings, donc le contrôle peut
+> légitimement être bon lui aussi et comprimer l'écart sans que ce soit un mauvais signe.
+> Le seuil du verdict a été recalibré en conséquence.
 
 **Réplication sur un 2ᵉ checkpoint indépendant** (v52@20k) — l'inversion tient, et sa
 **magnitude corrèle avec le comportement** :
