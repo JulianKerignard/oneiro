@@ -1445,6 +1445,28 @@ def parse_args():
                         "Prioritized replay reward, AC SEULEMENT (le WM garde une distribution "
                         "non-biaisée). 0.0 = off. Ne cible pas un achievement précis (buffer ne "
                         "stocke que reward=+1) → tous achievements confondus.")
+    # ---- Architecture (défauts = constantes du fichier). Exposée en CLI pour pouvoir
+    # tester la capacité sans commit. NOTE : le ranking des tailles mesuré avant le fix
+    # de convention (H_316) est caduc — le 65M perdait contre le 14M parce qu'il
+    # exploitait mieux l'optimum local créé par le crédit inversé, pas parce que la
+    # capacité nuisait. Repères : symoon11 WM=181.6M → 17.65% ; danijar XL deter 8192.
+    p.add_argument("--embed_dim", type=int, default=EMBED_DIM,
+                   help=f"Sortie du CNN encoder (défaut {EMBED_DIM}).")
+    p.add_argument("--h_dim", type=int, default=H_DIM,
+                   help=f"Taille du deter GRU (défaut {H_DIM} ; danijar 4096-8192).")
+    p.add_argument("--z_categories", type=int, default=Z_CATEGORIES,
+                   help=f"Nombre de variables catégorielles z (défaut {Z_CATEGORIES}).")
+    p.add_argument("--z_classes", type=int, default=Z_CLASSES,
+                   help=f"Classes par variable z (défaut {Z_CLASSES}).")
+    p.add_argument("--hidden_dim", type=int, default=HIDDEN_DIM,
+                   help=f"Largeur MLP du RSSM + reward/continue heads (défaut {HIDDEN_DIM}).")
+    p.add_argument("--cnn_depth", type=int, default=CNN_DEPTH,
+                   help=f"Canaux de base du CNN encoder/decoder (défaut {CNN_DEPTH} ; "
+                        "c'est le levier du decoder, où symoon11 est 5.2x plus gros).")
+    p.add_argument("--ac_hidden_dim", type=int, default=AC_HIDDEN_DIM,
+                   help=f"Largeur MLP actor/critic (défaut {AC_HIDDEN_DIM}).")
+    p.add_argument("--ac_num_layers", type=int, default=AC_NUM_LAYERS,
+                   help=f"Profondeur MLP actor/critic (défaut {AC_NUM_LAYERS}).")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--warmup_steps", type=int, default=WARMUP_STEPS)
     p.add_argument("--profile", action="store_true",
@@ -1656,29 +1678,39 @@ def main():
           f"({args.buffer_capacity:,} cap, {buffer.memory_usage_mb():.0f} MB)")
 
     # ----------- Setup models
+    # Dimensions prises depuis args (défauts = les constantes du fichier) : permet de
+    # varier l'architecture sans commit, donc de garder la discipline « une variable
+    # par run » sur les expériences de capacité.
+    embed_dim = args.embed_dim
+    h_dim = args.h_dim
+    hidden_dim = args.hidden_dim
+    cnn_depth = args.cnn_depth
+    ac_hidden = args.ac_hidden_dim
+    ac_layers = args.ac_num_layers
+
     rngs = nnx.Rngs(seed)
-    encoder = CNNEncoder(in_channels=3, embed_dim=EMBED_DIM, base_channels=CNN_DEPTH, rngs=rngs)
+    encoder = CNNEncoder(in_channels=3, embed_dim=embed_dim, base_channels=cnn_depth, rngs=rngs)
     rssm = RSSM(
-        embed_dim=EMBED_DIM, action_dim=action_dim,
-        h_dim=H_DIM, z_categories=Z_CATEGORIES, z_classes=Z_CLASSES,
-        hidden_dim=HIDDEN_DIM, rngs=rngs,
+        embed_dim=embed_dim, action_dim=action_dim,
+        h_dim=h_dim, z_categories=args.z_categories, z_classes=args.z_classes,
+        hidden_dim=hidden_dim, rngs=rngs,
     )
-    decoder = CNNDecoder(state_dim=rssm.state_dim, out_channels=3, base_channels=CNN_DEPTH, rngs=rngs)
-    reward_head = RewardHead(state_dim=rssm.state_dim, hidden_dim=HIDDEN_DIM, rngs=rngs)
-    continue_head = ContinueHead(state_dim=rssm.state_dim, hidden_dim=HIDDEN_DIM, rngs=rngs)
+    decoder = CNNDecoder(state_dim=rssm.state_dim, out_channels=3, base_channels=cnn_depth, rngs=rngs)
+    reward_head = RewardHead(state_dim=rssm.state_dim, hidden_dim=hidden_dim, rngs=rngs)
+    continue_head = ContinueHead(state_dim=rssm.state_dim, hidden_dim=hidden_dim, rngs=rngs)
     actor = Actor(
-        state_dim=rssm.state_dim, hidden_dim=AC_HIDDEN_DIM, action_dim=action_dim,
-        num_layers=AC_NUM_LAYERS, rngs=rngs,
+        state_dim=rssm.state_dim, hidden_dim=ac_hidden, action_dim=action_dim,
+        num_layers=ac_layers, rngs=rngs,
     )
     critic = Critic(
-        state_dim=rssm.state_dim, hidden_dim=AC_HIDDEN_DIM,
-        num_layers=AC_NUM_LAYERS, rngs=rngs,
+        state_dim=rssm.state_dim, hidden_dim=ac_hidden,
+        num_layers=ac_layers, rngs=rngs,
     )
 
     # Slow critic : copie initiale du critic
     slow_critic = Critic(
-        state_dim=rssm.state_dim, hidden_dim=AC_HIDDEN_DIM,
-        num_layers=AC_NUM_LAYERS, rngs=nnx.Rngs(seed + 100),
+        state_dim=rssm.state_dim, hidden_dim=ac_hidden,
+        num_layers=ac_layers, rngs=nnx.Rngs(seed + 100),
     )
     nnx.update(slow_critic, nnx.state(critic, nnx.Param))
 
