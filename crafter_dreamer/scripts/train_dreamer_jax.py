@@ -1913,6 +1913,20 @@ def main():
         # Métriques fines pour les figures du paper (par LOG_INTERVAL)
         "loss_pg": [], "returns_mean": [], "values_mean": [],
         "return_scale": [], "return_p5": [], "return_p95": [], "ips": [],
+        # Diagnostics reward head + imagination. Ils n'existaient QUE dans le texte du
+        # log, or Kaggle tronque le début des gros logs (sur v52/v53, les lignes d'iter
+        # ne commencent qu'à ~8000) → les critères de succès du fix reward étaient
+        # illisibles sur les 40% initiaux du run. Ici ils atterrissent dans le summary
+        # JSON, qui couvre lui l'intégralité du run.
+        #   rew_pred_ach / rew_pred_zero : prédiction de la head sur les achievements
+        #     (cible ~1.0) et sur les états à reward nul (doit rester ~0). Restent
+        #     IN-SAMPLE (calculés sur le batch fitté) — ne pas y lire une capacité de
+        #     généralisation, cf. docs/HYPOTHESES.md H_313.
+        #   img_rew_max / img_rew_frac_hi : le reward que l'actor voit réellement dans
+        #     l'imagination. Si img_rew_max reste ~0, aucune trajectoire rêvée ne
+        #     contient de récompense de taille achievement.
+        "rew_pred_ach": [], "rew_pred_zero": [], "rew_n_ach": [],
+        "img_rew_mean": [], "img_rew_max": [], "img_rew_frac_hi": [],
         # Par EVAL
         "eval_iter": [], "eval_score": [], "eval_length": [], "eval_achievements": [],
         "eval_sample": [], "eval_detail": [], "eval_crafter_score": [],
@@ -2325,6 +2339,13 @@ def main():
             history["return_p5"].append(float(return_ema_std[0]))
             history["return_p95"].append(float(return_ema_std[1]))
             history["ips"].append(float(ips))
+            # Diagnostics reward head + imagination (cf. commentaire à l'init de history)
+            history["rew_pred_ach"].append(vals.get("rew_pred_ach", 0.0))
+            history["rew_pred_zero"].append(vals.get("rew_pred_zero", 0.0))
+            history["rew_n_ach"].append(vals.get("rew_n_ach", 0.0))
+            history["img_rew_mean"].append(vals.get("img_rew_mean", 0.0))
+            history["img_rew_max"].append(vals.get("img_rew_max", 0.0))
+            history["img_rew_frac_hi"].append(vals.get("img_rew_frac_hi", 0.0))
 
             # ETA : iters restants × temps moyen par iter écoulé
             iters_left = args.train_iter - (it + 1)
