@@ -1,0 +1,4 @@
+iter,env_steps,score,length,achievements,sample,crafter_score,n_unlocked,unlocked_detail
+2500,80000,2.3999999999999995,178.6,3.3,3.0,1.57289791838598,4,collect_sapling:100;collect_wood:30;place_plant:100;wake_up:100
+5000,160000,2.099999999999999,170.4,3.0,3.2,1.5822192994929072,4,collect_sapling:100;collect_wood:10;place_plant:100;wake_up:90
+7500,240000,1.7,165.0,2.6,2.6,1.525172619621217,5,collect_sapling:100;collect_wood:20;eat_cow:10;place_plant:30;wake_up:100

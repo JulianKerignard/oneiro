@@ -263,6 +263,36 @@ Chaque hypothèse :
 
 ---
 
+## Résultat de référence — v54 @ 1M env steps (2026-08-12)
+
+Run **v54-rewardin-40k**, 65M params, coupé par le quota Kaggle à **37 500 / 40 000 iter**
+(94%, ~9.7 h) — donc **au-delà** du repère benchmark de 1M env steps (31 250 iter).
+
+| | crafter_score @1M | achievements | débloqués |
+|---|---|---|---|
+| random *(mesuré, 300 ép.)* | 1.51% | 2.34 | 8/22 |
+| Rainbow | 4.3% | — | — |
+| PPO | ~4.6% | — | — |
+| **Oneiro v54** | **10.05%** | **10.05** (best 10.56 @35k) | **19/22** |
+| DreamerV3-XL (paper) | 14.5% | 11.7 | — |
+| symoon11 (réf JAX) | 17.65% | — | — |
+
+Détail de la dernière éval : `collect_wood` 100%, `place_table` 97%,
+`make_wood_pickaxe` 89%, `make_wood_sword` 80%, `collect_stone` 77%, `place_stone` 77%,
+`defeat_zombie` 59%, `collect_coal` 41%, `place_furnace` 32%. `collect_iron` apparaît
+(0.03% cumulé) — un palier de plus dans l'arbre.
+
+⚠️ **Variance inter-run à ne pas sur-lire.** v53 et v54 ont la MÊME config et le MÊME
+seed (42), et divergent quand même : à iter 20000, v53 = 9.15 contre v54 = 6.91, soit
+**−2.24 ach** (écart médian sur 8 points appariés : −0.65). C'est cohérent avec la
+variance documentée (±1-2 ach sur Crafter, réductions XLA non déterministes + dynamique
+chaotique policy↔data). **Ne jamais classer deux configs sur des runs uniques.**
+
+⚠️ `crafter_score` étant cumulé depuis l'itération 0, 10.05% **sous-estime** la politique
+finale : les faiblesses du début de run sont incluses à jamais dans la moyenne.
+
+---
+
 ## Hypothèses EN COURS DE TEST 🔄
 
 ### H_313 — Le vrai goulot est la DURÉE DE VIE, et `rare_weight` l'écrase
