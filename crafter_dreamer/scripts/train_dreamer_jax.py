@@ -1768,8 +1768,29 @@ def main():
         if start_iter >= args.train_iter:
             print(f"[resume] iter {start_iter} >= train_iter {args.train_iter} : rien à faire.")
             return
-        # Caveat connu : optimizer Adam (m/v), buffer et EMAs repartent à zéro
-        # — resume "soft", suffisant pour survivre à une préemption spot.
+        # Restaure le scale EMA (P5/P95) s'il est présent dans le checkpoint. C'était LE
+        # piège de la reprise : sans lui, scale = max(p95-p5, 1.0) repart à ~1.0 alors
+        # qu'un run mature tourne à 5-8 → advantages gonflés d'autant sur plusieurs
+        # centaines d'itérations (EMA decay 0.99), juste après la reprise.
+        _ck = np.load(args.resume_from, allow_pickle=False)
+        if "__return_ema_std" in _ck.files:
+            return_ema_std = jnp.asarray(_ck["__return_ema_std"])
+            _p5, _p95 = float(return_ema_std[0]), float(return_ema_std[1])
+            print(f"[resume] scale EMA restauré : p5={_p5:.2f} p95={_p95:.2f} "
+                  f"→ scale={max(_p95 - _p5, 1.0):.2f}")
+        else:
+            print("[resume] /!\\ pas de __return_ema_std dans ce checkpoint (format ancien) : "
+                  "le scale repart de son init → advantages gonflés au démarrage.")
+        # Caveats restants, assumés :
+        #  - l'état Adam est bien ÉCRIT dans le checkpoint (clés __opt_wm.* / __opt_ac.*)
+        #    mais pas encore rechargé : il vit dans wm_state/ac_state après le split
+        #    functional, et le remapping des chemins est délicat. L'optimiseur redémarre
+        #    donc à froid (perturbation réelle mais bien plus douce que le saut de scale).
+        #  - buffer et PRNG key repartent de zéro : le buffer se re-remplit par un warmup
+        #    random, donc les premières centaines d'itérations rejouent des données
+        #    fraîches et peu diverses.
+        # → la reprise est un filet de sécurité contre une coupure de quota, PAS un moyen
+        #   de découper un run en tranches sans conséquence.
 
     # ----------- FIX 1 : Functional training loop
     # Split modules + optimizers en (graphdef, state). Le graphdef est capturé
@@ -2450,11 +2471,12 @@ def main():
                         auto_explore_multiplier = new_mult
                         auto_explore_consec_stag = 0
 
-            # Save checkpoint léger (state dicts)
+            # Save checkpoint léger (state dicts) + extras de reprise (Adam, scale EMA)
             ckpt_path = ckpt_dir / f"dreamer_crafter_jax_{args.run_name}_iter{it+1:06d}.npz"
             save_checkpoint(
                 ckpt_path, enc_eval, rssm_eval, dec_eval, rew_eval, cont_eval,
                 actor_eval, critic_eval, slow_eval, it + 1, args, history,
+                opt_wm=_opt, opt_ac=_opt_ac, return_ema_std=return_ema_std,
             )
             print(f"  Checkpoint saved : {ckpt_path.name}")
 
@@ -2543,13 +2565,27 @@ def main():
 
 
 def save_checkpoint(path, encoder, rssm, decoder, reward_head, continue_head,
-                    actor, critic, slow_critic, it, args, history):
+                    actor, critic, slow_critic, it, args, history,
+                    opt_wm=None, opt_ac=None, return_ema_std=None):
     """
     Sauvegarde via numpy npz : convertit chaque state nnx.Param en numpy.
     Format simple (pas orbax) pour rester portable et minimal.
+
+    Les clés `<module>.<path>` sont le format historique (lu par visualize_jax.py et
+    experiments/credit_assignment_probe.py) — ne pas les renommer.
+
+    Extras optionnels, préfixés `__` pour ne pas collisionner avec un nom de module :
+      __opt_wm.*, __opt_ac.*  : état Adam (m/v). Sans eux, un --resume_from redémarre
+                                l'optimiseur à froid.
+      __return_ema_std        : les percentiles EMA P5/P95 du return. Sans eux, le
+                                scale repart de son init (≈1.0) alors qu'un run mature
+                                tourne à 5-8 → advantages gonflés d'autant pendant
+                                plusieurs centaines d'itérations après la reprise.
+    Le buffer et la PRNG key restent non sauvés (volumineux / peu utiles) : la reprise
+    reste donc « soft », mais sans le saut de scale qui était le vrai danger.
     """
-    def state_to_numpy(m):
-        params = nnx.state(m, nnx.Param)
+    def state_to_numpy(m, filt=nnx.Param):
+        params = nnx.state(m, filt) if filt is not None else nnx.state(m)
         return {k: np.array(v) for k, v in flatten_state(params).items()}
 
     payload = {}
@@ -2560,6 +2596,18 @@ def save_checkpoint(path, encoder, rssm, decoder, reward_head, continue_head,
     ]:
         for k, v in state_to_numpy(m).items():
             payload[f"{name}.{k}"] = v
+
+    for name, opt in (("__opt_wm", opt_wm), ("__opt_ac", opt_ac)):
+        if opt is None:
+            continue
+        try:
+            for k, v in state_to_numpy(opt, filt=None).items():
+                payload[f"{name}.{k}"] = v
+        except Exception as e:            # non fatal : le checkpoint reste utilisable
+            print(f"  [ckpt] état optimizer {name} non sauvé ({type(e).__name__}: {e})")
+
+    if return_ema_std is not None:
+        payload["__return_ema_std"] = np.array(return_ema_std)
 
     np.savez_compressed(path, **payload)
     # Metadata side file (JSON)
