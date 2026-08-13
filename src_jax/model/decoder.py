@@ -55,7 +55,8 @@ class CNNDecoder(nnx.Module):
 
     Architecture : linear → reshape → 4 transposed conv (upsample ×16).
     Input  : (B, state_dim) ou (B, T, state_dim)
-    Output : (B, C, H, W) ou (B, T, C, H, W) — pixels en [0, 1] (sigmoid à la fin)
+    Output : (B, C, H, W) ou (B, T, C, H, W) — sortie LINÉAIRE + 0.5 (pas de sigmoid,
+             cf. __call__ : le réseau apprend obs - 0.5)
              Format NCHW pour compatibilité avec le pipeline de données.
 
     Note JAX : ConvTranspose opère en NHWC. On transpose NHWC → NCHW à la sortie.
@@ -117,7 +118,7 @@ class CNNDecoder(nnx.Module):
             state : (B, state_dim) ou (B, T, state_dim)
 
         Returns:
-            recon : (B, C, H, W) ou (B, T, C, H, W) — pixels en [0, 1], NCHW
+            recon : (B, C, H, W) ou (B, T, C, H, W) — NCHW, sortie linéaire + 0.5
         """
         orig_shape = state.shape
         if state.ndim == 3:

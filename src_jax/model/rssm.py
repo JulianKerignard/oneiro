@@ -40,10 +40,11 @@ class CustomGRUCell(nnx.Module):
     """
     GRU cell qui matche EXACTEMENT PyTorch nn.GRUCell.
 
-    Différence vs nnx.GRUCell standard :
-      - dense_h utilise use_bias=True (les biais b_hr, b_hz, b_hn sont présents)
-      - Pour le gate n : tanh(W_in·x + b_in + r * (W_hn·h + b_hn))
-        (r multiplie aussi b_hn, conforme PyTorch).
+    /!\ Le nom est historique : cette cellule ne matche PLUS nn.GRUCell de PyTorch.
+    Les deux Linear sont `use_bias=False` et un LayerNorm les suit — c'est le LayerNorm
+    qui porte scale et biais (aligné symoon11 / DreamerV3). Le LayerNorm dans la cellule
+    récurrente stabilise l'amplitude de h sous replay intensif : sans lui h dérive et les
+    gates sigmoid/tanh saturent.
 
     PyTorch nn.GRUCell formule officielle :
         r = sigmoid(W_ir·x + b_ir + W_hr·h + b_hr)
@@ -53,11 +54,8 @@ class CustomGRUCell(nnx.Module):
 
     Ordre des gates concaténés : (r, z, n) — identique à PyTorch (weight_ih ordonné rzn).
 
-    API compatible avec le test de parité numérique :
-      self.dense_i.kernel : (in, 3*hidden)
-      self.dense_i.bias   : (3*hidden,)
-      self.dense_h.kernel : (hidden, 3*hidden)
-      self.dense_h.bias   : (3*hidden,)
+    Paramètres : dense_i.kernel (in, 3*hidden), dense_h.kernel (hidden, 3*hidden),
+    plus les scale/bias des deux LayerNorm. Pas de `.bias` sur les Linear.
     """
 
     def __init__(self, input_size: int, hidden_size: int, *, rngs: nnx.Rngs):
@@ -159,12 +157,12 @@ class RSSM(nnx.Module):
         self.z_dim = z_categories * z_classes
         self.hidden_dim = hidden_dim
 
-        # ----- pre_gru : (z + action) → hidden_dim  (Linear + LayerNorm + ELU)
+        # ----- pre_gru : (z + action) → hidden_dim  (Linear + LayerNorm + SiLU)
         self.pre_gru_linear = nnx.Linear(self.z_dim + action_dim, hidden_dim, rngs=rngs)
         self.pre_gru_norm = nnx.LayerNorm(hidden_dim, epsilon=1e-5, rngs=rngs)
 
         # ----- GRU cell : hidden_dim input, h_dim hidden
-        # CustomGRUCell : matche PyTorch nn.GRUCell (bias_ih + bias_hh tous deux présents)
+        # CustomGRUCell : GRU + LayerNorm sur les gates (cf. sa docstring)
         # Signature : (h_prev, x) → (new_h, new_h)  (tuple comme nnx.GRUCell)
         self.gru = CustomGRUCell(input_size=hidden_dim, hidden_size=h_dim, rngs=rngs)
 
@@ -200,16 +198,16 @@ class RSSM(nnx.Module):
     # --------------------------------------------------------- internal nets
 
     def _pre_gru(self, x: jax.Array) -> jax.Array:
-        """(z + action) → hidden_dim. Linear → LayerNorm → ELU."""
+        """(z + action) → hidden_dim. Linear → LayerNorm → SiLU."""
         return jax.nn.silu(self.pre_gru_norm(self.pre_gru_linear(x)))
 
     def _prior_net(self, h: jax.Array) -> jax.Array:
-        """h → z_logits flat (z_dim,). Linear → LayerNorm → ELU → Linear."""
+        """h → z_logits flat (z_dim,). Linear → LayerNorm → SiLU → Linear."""
         x = jax.nn.silu(self.prior_norm(self.prior_linear1(h)))
         return self.prior_linear2(x)
 
     def _posterior_net(self, h_emb: jax.Array) -> jax.Array:
-        """(h, embedding) concat → z_logits flat (z_dim,). Linear → LN → ELU → Linear."""
+        """(h, embedding) concat → z_logits flat (z_dim,). Linear → LN → SiLU → Linear."""
         x = jax.nn.silu(self.post_norm(self.post_linear1(h_emb)))
         return self.post_linear2(x)
 
