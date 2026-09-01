@@ -7,7 +7,7 @@ les frames RGB sous forme de GIF ou MP4.
 
 Usage :
     .venv/bin/python crafter_dreamer/scripts/visualize_jax.py \\
-        --checkpoint ./modal_outputs/checkpoints/dreamer_crafter_jax_xxx_iter010000.npz \\
+        --checkpoint ./kaggle_outputs/<run>/checkpoints/dreamer_crafter_jax_<run>_iter040000.npz \\
         --output ./videos/episode_iter10000.gif \\
         --n_episodes 3 \\
         --fps 10 \\

@@ -2,7 +2,8 @@
 Decoder pour le World Model — version JAX/Flax NNX.
 
 Deux variantes :
-    - Decoder    : MLP, retourne LOGITS pour obs binaire (Tetris, BCEWithLogitsLoss)
+    - Decoder    : MLP, LOGITS pour obs binaire. Vestige de l'étape 1 du projet,
+                   inutilisé par Crafter — gardé car générique.
     - CNNDecoder : Transposed conv, retourne RECONSTRUCTION pour images RGB
                     (Crafter, MSE loss style DreamerV3)
 

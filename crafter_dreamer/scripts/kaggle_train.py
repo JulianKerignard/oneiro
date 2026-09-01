@@ -1,16 +1,21 @@
 """
-Launcher Kaggle pour le training Oneiro (notebook batch sur GPU P100 gratuit).
+Launcher Kaggle pour le training Oneiro (notebook batch, quota gratuit).
 
-Génère un notebook .ipynb (git clone branche + pip + run), le pousse via
-l'API Kaggle en mode "save & run all" sur P100, puis poll / récupère l'output.
+Génère un notebook .ipynb (git clone branche + pip + run), le pousse via l'API
+Kaggle en mode "save & run all", puis poll / récupère l'output.
+Accélérateur : TPU v5e-8 avec --tpu (ce que la prod utilise), GPU P100 sinon.
 
-Même esprit que lightning_train_jax.py, adapté aux contraintes Kaggle :
+Contraintes Kaggle prises en compte :
   - pas de logs en direct (output dispo à la FIN du kernel) → on poll le statut
-  - session batch max ~12h → run 30k (~7-10h) tient, sinon resume via re-push
+  - session batch max ~12h → viser < 10h (mesuré : un run coupé à 9.7h), sinon
+    reprendre via --resume-from-kernel
   - buffer 1M en RAM host (32GB Kaggle) via --buffer_device cpu
 
-Auth (CLI kaggle) : ~/.kaggle/kaggle.json {"username","key"} OU env
-KAGGLE_USERNAME / KAGGLE_KEY. Le username sert aussi à nommer le kernel.
+Auth : le CLI kaggle >= 2.2 veut un TOKEN, pas l'ancien couple username/key —
+exporter KAGGLE_API_TOKEN (+ KAGGLE_USERNAME, qui sert à nommer le kernel).
+Un ~/.kaggle/kaggle.json seul ne suffit PLUS : le CLI répond "Authentication
+required" sans expliquer que le format a changé.
+Dans ce repo : `source ./.env.kaggle` (fichier local, gitignored).
 
 Usage :
     python crafter_dreamer/scripts/kaggle_train.py launch \\

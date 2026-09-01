@@ -9,7 +9,7 @@ Pour la loss au training      : critic.loss(state, returns_target).
 
 Avantages vs MSE simple :
   - Gradient stable même quand les returns ont une grande dynamique
-  - Pas d'explosion sur les rewards rares (line clears Tetris)
+  - Pas d'explosion sur les rewards rares (achievements Crafter)
   - Standard DreamerV3, prouvé robuste sur 150+ envs sans tuning
 
 Note Flax NNX : self.bins est un tableau JAX simple (non-paramètre, non-tracé

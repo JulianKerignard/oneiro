@@ -1,8 +1,8 @@
 """
 Training complet du mini-Dreamer pour Crafter — version JAX / Flax NNX.
 
-Port de scripts/train_dreamer.py (PyTorch) vers JAX. Vise un speedup 10-30×
-sur Modal L4 GPU grâce à :
+Port de scripts/train_dreamer.py (PyTorch) vers JAX. Entraînement sur TPU v5e-8
+(Kaggle) via crafter_dreamer/scripts/kaggle_train.py. Le gain vient de :
   - jit-compilation des train_steps (forward + backward + optimizer update fusionnés)
   - jax.lax.scan pour les séquences RSSM et l'imagination (pas de boucle Python)
   - dispatch GPU XLA optimisé
@@ -65,7 +65,8 @@ SEED = 42
 # 1M = paper. Couvre un run 30k iter ENTIER sans wrap FIFO (v21/H_312 : à
 # 500k le buffer était plein à iter 15.6k → écrasement de la diversité early
 # → perte de la capacité de récupération → dérive descendante après ~19k).
-# VRAM : ~12.3GB uint8 — large sur RTXP 96GB ; serré mais possible sur L4 24GB.
+# ~12.3 GB en uint8 : tient en RAM host (--buffer_device cpu, le défaut en prod TPU)
+# mais pas en VRAM sur un accélérateur modeste.
 BUFFER_CAPACITY = 1_000_000
 WARMUP_STEPS = 5_000
 
@@ -1483,7 +1484,8 @@ def parse_args():
     p.add_argument("--buffer_device", choices=["gpu", "cpu"], default="gpu",
                    help="gpu : buffer en VRAM (rapide, défaut, besoin ~12.3GB VRAM à 1M). "
                         "cpu : buffer en RAM host, transfert du batch au sample "
-                        "(pour GPU à faible VRAM type RTX 3080 ; -20 à -40%% ips).")
+                        "(défaut en production TPU, et seule option si la VRAM ne tient "
+                        "pas les 12.3 GB ; -20 à -40%% ips).")
     p.add_argument("--resume_from", type=str, default=None,
                    help="Checkpoint .npz à charger pour reprendre le training "
                         "(reprend à l'iter du .meta.json). Le buffer repart du "

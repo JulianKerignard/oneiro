@@ -122,7 +122,7 @@ class ImageReplayBuffer:
 # ImageReplayBufferJAX : buffer GPU-resident pour fix le bottleneck sample_batch
 # ============================================================================
 #
-# Profiling Modal L4 a montré que sample_batch = 36% du temps total à cause de :
+# Un profiling GPU (Modal L4, ère v15-v22) avait montré sample_batch = 36% du temps :
 #   1. Buffer numpy CPU → cast float32 + normalize côté CPU (cher)
 #   2. device_put de (B, T, 3, 64, 64) float32 à chaque sample (~1.5 MB transfer)
 #
@@ -381,7 +381,7 @@ class ImageReplayBufferJAX:
 # ============================================================================
 #
 # Variante de ImageReplayBufferJAX pour les GPU dont la VRAM ne tient pas le
-# buffer 1M (~12.3GB), typiquement RTX 3080 (10GB). Le buffer vit en RAM
+# buffer 1M (~12.3GB). C'est le chemin utilisé en production sur TPU. Le buffer vit en RAM
 # système (numpy) ; seul le BATCH samplé (~12.6MB) est transféré sur GPU.
 #
 # Trade-off vs la version GPU-resident :

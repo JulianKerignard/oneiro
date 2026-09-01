@@ -2,7 +2,8 @@
 Encoder pour le World Model — version JAX/Flax NNX.
 
 Deux variantes :
-    - Encoder    : MLP, pour observations vectorielles (Tetris, ~276 dim)
+    - Encoder    : MLP pour observations VECTORIELLES. Vestige de l'étape 1 du
+                   projet (grille), inutilisé par Crafter — gardé car générique.
     - CNNEncoder : Conv2d, pour images (Crafter 64×64×3, Minecraft à venir)
 
 Style DreamerV3, encoder DÉTERMINISTE. La stochasticité (sampling z) est gérée
@@ -18,7 +19,7 @@ from flax import nnx
 
 
 class Encoder(nnx.Module):
-    """MLP encoder : obs vectorielle → embedding (Tetris)."""
+    """MLP encoder : obs vectorielle → embedding. Non utilisé par Crafter."""
 
     def __init__(
         self,
