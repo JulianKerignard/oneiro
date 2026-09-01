@@ -1469,6 +1469,12 @@ def parse_args():
                    help=f"Profondeur MLP actor/critic (défaut {AC_NUM_LAYERS}).")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--warmup_steps", type=int, default=WARMUP_STEPS)
+    p.add_argument("--resume_warmup_steps", type=int, default=50_000,
+                   help="Transitions collectées pour re-remplir le buffer à la reprise "
+                        "(--resume_from), avec la politique CHARGÉE et non au hasard. Le "
+                        "buffer n'étant pas sauvé (12.3 GB à 1M), c'est ce qui évite de "
+                        "réentraîner un agent compétent sur une poignée de données "
+                        "aléatoires. 50k ≈ quelques minutes de collecte.")
     p.add_argument("--profile", action="store_true",
                    help="Active le profiling fin (breakdown collect/WM/AC/transfer).")
     p.add_argument("--buffer_capacity", type=int, default=BUFFER_CAPACITY,
@@ -1804,6 +1810,9 @@ def main():
         # piège de la reprise : sans lui, scale = max(p95-p5, 1.0) repart à ~1.0 alors
         # qu'un run mature tourne à 5-8 → advantages gonflés d'autant sur plusieurs
         # centaines d'itérations (EMA decay 0.99), juste après la reprise.
+        # Etat Adam (mu/nu/count) des deux optimizers.
+        load_optimizer_state(args.resume_from, {"__opt_wm": opt_wm, "__opt_ac": opt_ac})
+
         _ck = np.load(args.resume_from, allow_pickle=False)
         if "__return_ema_std" in _ck.files:
             return_ema_std = jnp.asarray(_ck["__return_ema_std"])
@@ -1813,16 +1822,9 @@ def main():
         else:
             print("[resume] /!\\ pas de __return_ema_std dans ce checkpoint (format ancien) : "
                   "le scale repart de son init → advantages gonflés au démarrage.")
-        # Caveats restants, assumés :
-        #  - l'état Adam est bien ÉCRIT dans le checkpoint (clés __opt_wm.* / __opt_ac.*)
-        #    mais pas encore rechargé : il vit dans wm_state/ac_state après le split
-        #    functional, et le remapping des chemins est délicat. L'optimiseur redémarre
-        #    donc à froid (perturbation réelle mais bien plus douce que le saut de scale).
-        #  - buffer et PRNG key repartent de zéro : le buffer se re-remplit par un warmup
-        #    random, donc les premières centaines d'itérations rejouent des données
-        #    fraîches et peu diverses.
-        # → la reprise est un filet de sécurité contre une coupure de quota, PAS un moyen
-        #   de découper un run en tranches sans conséquence.
+        # Caveat restant : la PRNG key repart de zéro (sans effet sur la qualité, seule
+        # la reproductibilité bit-a-bit est perdue). Le buffer, lui, est re-rempli par un
+        # warmup ON-POLICY — cf. Phase 0 plus bas.
 
     # ----------- FIX 1 : Functional training loop
     # Split modules + optimizers en (graphdef, state). Le graphdef est capturé
@@ -1884,19 +1886,76 @@ def main():
     # aux specs P() brutes de résoudre et fixe le contexte d'exécution.
     jax.set_mesh(mesh)
 
-    # ----------- Phase 0 : Warmup random
+    # ----------- Phase 0 : Warmup — remplissage initial du buffer
+    #
+    # Le buffer n'est PAS sauvegardé dans les checkpoints (1M transitions uint8 =
+    # 12.3 GB). A la reprise il repart donc vide, et c'était la principale source de
+    # perte de qualité : l'ancienne version le remplissait avec 5000 transitions de
+    # politique ALEATOIRE, puis relançait l'entraînement dessus à replay ratio 128-256.
+    # Un agent à 10 achievements/épisode voyait ainsi son world model réentraîné sur des
+    # données de marche au hasard, et chaque transition rejouée des dizaines de fois.
+    #
+    # A la reprise on remplit donc avec la politique CHARGEE, et sur bien plus de pas
+    # (--resume_warmup_steps) : la distribution du buffer redevient celle que l'agent
+    # produit réellement, et le sur-apprentissage sur un échantillon minuscule disparaît.
+    resuming = bool(args.resume_from)
+    n_warmup = args.resume_warmup_steps if resuming else args.warmup_steps
+    mode = "ON-POLICY (reprise)" if resuming else "random"
     print("=" * 60)
-    print(f"Phase 0 : Warmup random ({args.warmup_steps} steps, {n_envs} envs)")
+    print(f"Phase 0 : Warmup {mode} ({n_warmup} steps, {n_envs} envs)")
     print("=" * 60)
     t_start = time.time()
-    steps_per_env = args.warmup_steps // n_envs
-    for _ in range(steps_per_env):
-        for i, env in enumerate(envs):
-            action = np.random.randint(0, action_dim)
-            next_obs, r, done, _ = env.step(action)
-            buffer.add(obs_list[i], action, r, next_obs, done, env_id=i)
-            obs_list[i] = next_obs if not done else env.reset()
+    steps_per_env = max(1, n_warmup // n_envs)
+
+    if resuming:
+        # Même boucle que la collecte de la phase 1 : état RSSM porté d'un step à
+        # l'autre, remis à zéro sur `done`, actions tirées de la politique chargée.
+        warm_state = jax.device_put(rssm.init_state(n_envs), repl_sharding)
+        warm_prev_a = jax.device_put(
+            jnp.zeros((n_envs, action_dim), dtype=jnp.float32), repl_sharding)
+        # Clé dédiée dérivée du seed : `main_key` n'est créée qu'après cette phase,
+        # et on ne veut pas consommer son flux (la collecte de la phase 1 doit rester
+        # reproductible indépendamment de la longueur du warmup).
+        warm_key = jr.PRNGKey(seed + 777)
+        for _ in range(steps_per_env):
+            obs_batch = jax.device_put(np.stack(obs_list), repl_sharding)
+            warm_key, subk = jr.split(warm_key)
+            warm_state, actions_int = act_fn_func(
+                wm_state, ac_state, warm_state, warm_prev_a, obs_batch, subk, 0.01)
+            actions_np = np.asarray(actions_int)
+            h_arr, z_arr = np.array(warm_state["h"]), np.array(warm_state["z"])
+            next_prev_a = np.zeros((n_envs, action_dim), dtype=np.float32)
+            for i, env in enumerate(envs):
+                a = int(actions_np[i])
+                next_obs, r, done, _ = env.step(a)
+                buffer.add(obs_list[i], a, r, next_obs, done, env_id=i)
+                if done:
+                    h_arr[i] = 0.0        # reset de l'état latent sur fin d'épisode
+                    z_arr[i] = 0.0
+                    obs_list[i] = env.reset()
+                else:
+                    next_prev_a[i, a] = 1.0
+                    obs_list[i] = next_obs
+            warm_state = {"h": jax.device_put(h_arr, repl_sharding),
+                          "z": jax.device_put(z_arr, repl_sharding)}
+            warm_prev_a = jax.device_put(next_prev_a, repl_sharding)
+    else:
+        for _ in range(steps_per_env):
+            for i, env in enumerate(envs):
+                action = np.random.randint(0, action_dim)
+                next_obs, r, done, _ = env.step(action)
+                buffer.add(obs_list[i], action, r, next_obs, done, env_id=i)
+                obs_list[i] = next_obs if not done else env.reset()
+    # Densité de récompense du buffer initial : c'est LE diagnostic de la reprise.
+    # Un warmup aléatoire produit ~0.012 reward/step (≈2.3 achievements/épisode) ; un
+    # agent competent ~0.035-0.045. Si ce chiffre s'effondre après une reprise, le
+    # world model va être réentraîné sur des données non représentatives.
+    _wr = np.asarray(buffer.rewards)
+    _n = min(len(buffer), _wr.size)
+    _rate = float(np.abs(_wr).sum() / max(_n, 1))
+    _ach = float((np.abs(_wr) > 0.5).sum() / max(_n, 1))
     print(f"Buffer : {len(buffer)} transitions en {time.time() - t_start:.1f}s")
+    print(f"         reward/step = {_rate:.4f}   transitions à |r|>0.5 = {100 * _ach:.2f}%")
     print(f"         Mémoire buffer : {buffer.memory_usage_mb():.1f} MB")
     print()
 
@@ -1933,18 +1992,36 @@ def main():
         "eval_train_episodes": [],
     }
 
-    # Protocole Crafter officiel : compteurs sur les épisodes de TRAINING
+    # Protocole Crafter officiel : compteurs sur les épisodes de TRAINING.
+    # Repris du checkpoint si disponible : le crafter_score etant cumule depuis
+    # l'iteration 0, repartir de zero apres une reprise casserait la comparabilite
+    # avec la premiere moitie du run.
     train_episode_count = 0
     train_ach_counts = {}
+    _resumed_counters = {}
+    if args.resume_from:
+        _mp = Path(args.resume_from).with_suffix(".meta.json")
+        if _mp.exists():
+            _resumed_counters = json.loads(_mp.read_text()).get("counters", {}) or {}
+        if _resumed_counters:
+            train_ach_counts = dict(_resumed_counters.get("train_ach_counts", {}))
+            train_episode_count = int(_resumed_counters.get("train_episode_count", 0))
+            print(f"[resume] compteurs restaurés : {train_episode_count} épisodes, "
+                  f"{len(train_ach_counts)} achievements déjà vus")
+        else:
+            print("[resume] /!\\ pas de compteurs dans le meta (format ancien) : "
+                  "le crafter_score repart de zéro et n'est pas comparable au pré-reprise.")
     # DIAGNOSTIC comportemental (cumulé sur les épisodes de train) :
     #   diag_wood_hist  : distribution du max de bois atteint par épisode (0..5+).
     #     place_table coûte 2 bois, la pioche +1 → si la masse est sur 0-1, tout le
     #     craft est ARITHMÉTIQUEMENT hors de portée, quel que soit le modèle.
     #   diag_action_counts : histogramme des 17 actions réellement jouées → distingue
     #     "n'essaie jamais l'action" de "l'essaie mais échoue".
-    diag_wood_hist = np.zeros(6, dtype=np.int64)
-    diag_action_counts = np.zeros(action_dim, dtype=np.int64)
-    diag_reached_stone = 0
+    diag_wood_hist = np.array(_resumed_counters.get("diag_wood_hist") or [0] * 6,
+                              dtype=np.int64)
+    diag_action_counts = np.array(
+        _resumed_counters.get("diag_action_counts") or [0] * action_dim, dtype=np.int64)
+    diag_reached_stone = int(_resumed_counters.get("diag_reached_stone", 0))
 
     collected_rewards = []
     # RSSM state multi-env pour la collecte.
@@ -2530,6 +2607,11 @@ def main():
                 ckpt_path, enc_eval, rssm_eval, dec_eval, rew_eval, cont_eval,
                 actor_eval, critic_eval, slow_eval, it + 1, args, history,
                 opt_wm=_opt, opt_ac=_opt_ac, return_ema_std=return_ema_std,
+                counters={"train_ach_counts": train_ach_counts,
+                          "train_episode_count": train_episode_count,
+                          "diag_wood_hist": diag_wood_hist,
+                          "diag_action_counts": diag_action_counts,
+                          "diag_reached_stone": diag_reached_stone},
             )
             print(f"  Checkpoint saved : {ckpt_path.name}")
 
@@ -2609,6 +2691,12 @@ def main():
     save_checkpoint(
         final_ckpt, enc_f, rssm_f, dec_f, rew_f, cont_f,
         actor_f, critic_f, slow_f, args.train_iter, args, history,
+        opt_wm=opt_wm, opt_ac=opt_ac, return_ema_std=return_ema_std,
+        counters={"train_ach_counts": train_ach_counts,
+                  "train_episode_count": train_episode_count,
+                  "diag_wood_hist": diag_wood_hist,
+                  "diag_action_counts": diag_action_counts,
+                  "diag_reached_stone": diag_reached_stone},
     )
     print(f"Final checkpoint : {final_ckpt}")
 
@@ -2619,7 +2707,7 @@ def main():
 
 def save_checkpoint(path, encoder, rssm, decoder, reward_head, continue_head,
                     actor, critic, slow_critic, it, args, history,
-                    opt_wm=None, opt_ac=None, return_ema_std=None):
+                    opt_wm=None, opt_ac=None, return_ema_std=None, counters=None):
     """
     Sauvegarde via numpy npz : convertit chaque state nnx.Param en numpy.
     Format simple (pas orbax) pour rester portable et minimal.
@@ -2663,10 +2751,18 @@ def save_checkpoint(path, encoder, rssm, decoder, reward_head, continue_head,
         payload["__return_ema_std"] = np.array(return_ema_std)
 
     np.savez_compressed(path, **payload)
-    # Metadata side file (JSON)
+    # Metadata side file (JSON). `counters` permet a une reprise de continuer le
+    # crafter_score sur la meme base : il est cumule depuis l'iteration 0 (protocole
+    # officiel), donc repartir de zero rendrait la metrique incomparable de part et
+    # d'autre de la reprise.
     meta_path = path.with_suffix(".meta.json")
+    meta = {"iter": int(it), "args": vars(args)}
+    if counters is not None:
+        meta["counters"] = {k: (dict(v) if isinstance(v, dict) else
+                                (v.tolist() if hasattr(v, "tolist") else v))
+                            for k, v in counters.items()}
     with open(meta_path, "w") as f:
-        json.dump({"iter": int(it), "args": vars(args)}, f, indent=2)
+        json.dump(meta, f, indent=2)
 
 
 def _set_at_path(state, path_parts, value):
@@ -2693,6 +2789,36 @@ def _set_at_path(state, path_parts, value):
         leaf.value = jnp.asarray(value)
     else:
         node[leaf_key] = jnp.asarray(value)
+
+
+def load_optimizer_state(path, named_optimizers) -> int:
+    """Recharge l'etat interne des optimizers (Adam mu/nu, count) depuis un checkpoint.
+
+    Sans ca, une reprise redemarre Adam a froid : les moments valent 0, donc les
+    premiers pas sont mal calibres (le pas effectif d'Adam vaut ~lr quel que soit le
+    gradient tant que mu/nu n'ont pas chauffe) — exactement au moment ou le modele
+    est le plus fragile.
+
+    named_optimizers : {prefixe: nnx.Optimizer}, memes prefixes qu'a la sauvegarde
+    (`__opt_wm`, `__opt_ac`). Retourne le nombre de tenseurs restaures.
+    """
+    ckpt = np.load(path, allow_pickle=False)
+    total = 0
+    for prefix, opt in named_optimizers.items():
+        state = nnx.state(opt)
+        expected = flatten_state(state)
+        found = 0
+        for key in expected:
+            full = f"{prefix}.{key}"
+            if full in ckpt.files:
+                _set_at_path(state, key.split("."), ckpt[full])
+                found += 1
+        if found:
+            nnx.update(opt, state)
+            total += found
+        print(f"[resume]   {prefix} : {found}/{len(expected)} tenseurs"
+              + ("" if found else "  (absent du checkpoint — Adam repart a froid)"))
+    return total
 
 
 def load_checkpoint_into_modules(path, named_modules):
