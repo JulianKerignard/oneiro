@@ -127,7 +127,8 @@ crafter_dreamer/
   scripts/train_dreamer_jax.py    # training loop — single entry point
   scripts/kaggle_train.py         # Kaggle TPU launcher (launch / status / pull)
   scripts/visualize_jax.py        # rollout GIFs from a checkpoint
-  scripts/test_*.py               # PyTorch↔JAX parity checks (need torch)
+  scripts/test_*.py               # historical PyTorch↔JAX diagnostics, not a test suite
+                                  # (need torch; the JAX side has deliberately diverged)
   env/env.py                      # Crafter wrapper
 src_jax/                          # JAX/Flax NNX modules
   model/                          # encoder, decoder, rssm, actor, critic, heads, rnd
