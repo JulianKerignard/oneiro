@@ -295,6 +295,58 @@ finale : les faiblesses du début de run sont incluses à jamais dans la moyenne
 
 ## Hypothèses EN COURS DE TEST 🔄
 
+### H_318 — Le replay ratio 128 est trop faible pour que les événements RARES s'apprennent
+
+**Énoncé** : le mur `make_stone_pickaxe` n'est ni un problème d'horizon de valeur, ni de
+ressources, ni de navigation — c'est un problème d'**amorçage statistique**. L'agent ne peut
+pas valoriser un état qu'il n'a quasiment jamais vu payer, et il ne peut pas le voir payer
+tant qu'il ne le valorise pas. Doubler le replay ratio (128 → 256) double le nombre de pas
+de gradient par transition collectée, donc le poids accordé aux quelques épisodes rares
+présents dans le buffer.
+
+**Ce qui a été ÉCARTÉ par la mesure** (2026-09-01, 25 épisodes réels sur le checkpoint v54) :
+- **l'horizon de valeur** : l'écart `place_table → collect_stone` vaut **46 steps médians**,
+  contre un horizon mesuré de 74 (65M) et 53 (14.4M). Le pont est dans la portée des deux.
+- **la rareté du bois** : l'agent en ramasse **9 par épisode** (min 5, max 16) pour un budget
+  requis de 5 sur toute la chaîne.
+- **la navigation / mémoire spatiale** : il n'a même pas besoin de revenir à sa table, il
+  pourrait en poser une seconde sur place — il a 2 bois dans ~19% des épisodes au moment où
+  il obtient sa pierre. Il ne le fait jamais non plus. Une table, à cet instant, ne vaut
+  simplement **rien** dans son modèle.
+
+**Le chiffre du mur** : `make_stone_pickaxe` = **31 succès sur 54 208 épisodes** (0.06%), et
+Crafter ne paie chaque achievement qu'**une fois par épisode** — donc même un succès
+accidentel ne laisse qu'un échantillon noyé dans ~640k transitions.
+
+**Écart au paper** : danijar utilise `train_ratio: 512`, nous 128. Levier à **zéro paramètre
+ajouté**, donc aligné avec l'objectif « petit modèle puissant ».
+
+⚠️ **Le ratio a déjà été testé (v25/v27b/v46) et déclaré neutre voire nuisible — mais SOUS
+le bug de convention.** Avec un crédit inversé, multiplier les pas de gradient ne pouvait
+qu'amplifier un signal faussé. Cette conclusion est **caduque**, au même titre que le
+classement des tailles et le prioritized replay de v43.
+
+**Run de test** : v56-ratio256 — `--wm_train_per_iter 8 --ac_train_per_iter 8` (→ ratio 256),
+**seule variable** modifiée vs v55. Archi 14.4M identique, seed 42, 25 000 iter = 0.80M env
+steps (~9 h estimées à ~0.78 ips, extrapolé du couple v26→v27b où ×4 de ratio coûtait ÷3.3
+de vitesse).
+
+**Statut** : 🔄 EN COURS
+
+**Critère de décision, à itération appariée** (= env steps appariés, `collect_per_iter` étant
+identique) — références v55 : @20000 → 6.29 ach, @22500 → 6.56, @25000 → **6.71** :
+- **@25000 > 7.5 ach** → le ratio aide franchement, enchaîner sur 512.
+- **6.7 – 7.5** → dans la variance inter-run mesurée (±1-2 ach). Non concluant : exigerait
+  du multi-seed, donc trop cher pour trancher.
+- **< 6.7** → le ratio ne compense pas la moitié d'env steps « perdue » en temps de calcul.
+- Signal fin à surveiller, disponible depuis le commit `da09328` : `rew_pred_ach` (prédiction
+  de la reward head sur les achievements). Si le ratio agit par le mécanisme supposé, elle
+  doit monter **avant** que les achievements ne bougent.
+- Le vrai succès resterait `make_stone_pickaxe` > 0 de façon soutenue.
+
+---
+
+
 ### H_313 — Le vrai goulot est la DURÉE DE VIE, et `rare_weight` l'écrase
 
 **Énoncé** : le plafond à ~3 achievements / crafter_score 2.2-2.5% n'est ni un problème
