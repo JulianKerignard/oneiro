@@ -8,6 +8,19 @@ A from-scratch reimplementation of [DreamerV3](https://arxiv.org/abs/2301.04104)
 
 ![agent](videos/oneiro_demo_opt.gif)
 
+*⚠️ This clip is stale — it shows the **v18** agent (~64k env steps, 5 achievements), from
+before the reward-convention fix described below. The current agent reaches 10.56
+achievements per episode. Regenerate from any checkpoint with:*
+
+```bash
+python crafter_dreamer/scripts/visualize_jax.py \
+    --checkpoint kaggle_outputs/<run>/checkpoints/<ckpt>.npz \
+    --output videos/demo.gif --n_episodes 3 --deterministic
+```
+
+*The architecture is read from the checkpoint (its `.meta.json`, or inferred from tensor
+shapes), so any run's checkpoint works without flags.*
+
 ## Results
 
 Crafter score at the standard **1M environment-step** budget (geometric mean of the 22 achievement success rates). Reference rows are the [official Crafter scoreboard](https://github.com/danijar/crafter#scoreboards).

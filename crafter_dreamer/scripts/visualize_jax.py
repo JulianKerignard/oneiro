@@ -37,14 +37,15 @@ from crafter_dreamer.env import CrafterEnv
 from src_jax.model import CNNEncoder, RSSM, Actor
 
 
-# ============================== Constantes (doivent matcher train_dreamer_jax.py)
-EMBED_DIM = 192
-H_DIM = 384
-Z_CATEGORIES = 24
-Z_CLASSES = 24
-HIDDEN_DIM = 768
+# ============================== Architecture
+# Elle N'EST PLUS codee en dur : un checkpoint ne se charge que si les formes
+# correspondent, et les runs successifs ont utilise des architectures differentes
+# (v18 : deter 384, z 24x24 — v54 : deter 2048, z 32x32 — v55 : deter 1280, z 32x16).
+# Ordre de resolution, du plus fiable au moins fiable :
+#   1. le .meta.json a cote du checkpoint (present depuis l'exposition CLI de l'archi)
+#   2. l'inference depuis les formes des tenseurs du .npz
+#   3. les flags CLI, qui priment sur tout si fournis
 ACTION_DIM = 17   # Crafter
-BASE_CHANNELS = 32
 INPUT_RES = 64
 
 
@@ -166,28 +167,94 @@ def load_module_params(module, ckpt, prefix):
 
 # ============================== Build + load des modules
 
-def build_modules(seed: int = 0):
-    """Instancie encoder + RSSM + actor avec les hyperparams attendus."""
+def infer_arch(ckpt, meta=None, overrides=None):
+    """Determine l'architecture d'un checkpoint.
+
+    meta.json d'abord (fiable), puis inference depuis les formes des tenseurs, puis
+    les overrides CLI qui priment. Les formes exploitees :
+        rssm.gru.dense_h.kernel   (h_dim, 3*h_dim)
+        rssm.prior_linear2.kernel (hidden_dim, z_dim)
+        rssm.post_linear1.kernel  (h_dim + embed_dim, hidden_dim)
+        actor.linears.0.kernel    (state_dim, ac_hidden_dim)
+        encoder.conv1.kernel      (k, k, in_ch, cnn_depth)
+    Seul le PRODUIT z_categories x z_classes est inferable : on suppose
+    z_categories=32 (convention DreamerV3, vraie sur tous nos runs recents) et on
+    en deduit z_classes. `--z_categories` permet de corriger pour un vieux
+    checkpoint (v18 utilisait 24x24).
+    """
+    a = {}
+    margs = (meta or {}).get("args", {}) or {}
+    for k in ("embed_dim", "h_dim", "z_categories", "z_classes",
+              "hidden_dim", "cnn_depth", "ac_hidden_dim", "ac_num_layers"):
+        if k in margs and margs[k] is not None:
+            a[k] = int(margs[k])
+    src = "meta.json" if a else "formes du checkpoint"
+
+    def shape(key):
+        return ckpt[key].shape if key in ckpt.files else None
+
+    if "h_dim" not in a and (s := shape("rssm.gru.dense_h.kernel")):
+        a["h_dim"] = int(s[0])
+    if s := shape("rssm.prior_linear2.kernel"):
+        a.setdefault("hidden_dim", int(s[0]))
+        z_dim = int(s[1])
+    else:
+        z_dim = a.get("z_categories", 32) * a.get("z_classes", 32)
+    if "embed_dim" not in a and (s := shape("rssm.post_linear1.kernel")):
+        a["embed_dim"] = int(s[0]) - a["h_dim"]
+    if "ac_hidden_dim" not in a and (s := shape("actor.linears.0.kernel")):
+        a["ac_hidden_dim"] = int(s[1])
+    if "ac_num_layers" not in a:
+        a["ac_num_layers"] = sum(
+            1 for k in ckpt.files if k.startswith("actor.linears.") and k.endswith(".kernel")
+        ) or 2
+    if "cnn_depth" not in a:
+        for k in ("encoder.conv1.kernel", "encoder.conv_1.kernel"):
+            if s := shape(k):
+                a["cnn_depth"] = int(s[-1])
+                break
+        a.setdefault("cnn_depth", 32)
+    if "z_categories" not in a:
+        a["z_categories"] = 32
+    if "z_classes" not in a:
+        a["z_classes"] = max(1, z_dim // a["z_categories"])
+
+    for k, v in (overrides or {}).items():
+        if v is not None:
+            a[k] = int(v)
+            src += f" (+ --{k})"
+
+    got = a["z_categories"] * a["z_classes"]
+    if got != z_dim:
+        print(f"  /!\\ z_categories x z_classes = {got} mais le checkpoint dit {z_dim} : "
+              f"preciser --z_categories / --z_classes")
+    print(f"  archi ({src}) : embed={a['embed_dim']} deter={a['h_dim']} "
+          f"z={a['z_categories']}x{a['z_classes']} hidden={a['hidden_dim']} "
+          f"cnn={a['cnn_depth']} ac={a['ac_hidden_dim']}x{a['ac_num_layers']}")
+    return a
+
+
+def build_modules(arch, seed: int = 0):
+    """Instancie encoder + RSSM + actor aux dimensions de `arch`."""
     rngs = nnx.Rngs(seed)
     encoder = CNNEncoder(
-        in_channels=3, embed_dim=EMBED_DIM,
-        base_channels=BASE_CHANNELS, input_resolution=INPUT_RES,
+        in_channels=3, embed_dim=arch["embed_dim"],
+        base_channels=arch["cnn_depth"], input_resolution=INPUT_RES,
         rngs=rngs,
     )
     rssm = RSSM(
-        embed_dim=EMBED_DIM, action_dim=ACTION_DIM,
-        h_dim=H_DIM, z_categories=Z_CATEGORIES, z_classes=Z_CLASSES,
-        hidden_dim=HIDDEN_DIM, rngs=rngs,
+        embed_dim=arch["embed_dim"], action_dim=ACTION_DIM,
+        h_dim=arch["h_dim"], z_categories=arch["z_categories"],
+        z_classes=arch["z_classes"], hidden_dim=arch["hidden_dim"], rngs=rngs,
     )
-    state_dim = rssm.state_dim  # H_DIM + Z_CATEGORIES * Z_CLASSES
     actor = Actor(
-        state_dim=state_dim, action_dim=ACTION_DIM,
-        hidden_dim=HIDDEN_DIM, rngs=rngs,
+        state_dim=rssm.state_dim, action_dim=ACTION_DIM,
+        hidden_dim=arch["ac_hidden_dim"], num_layers=arch["ac_num_layers"], rngs=rngs,
     )
     return encoder, rssm, actor
 
 
-def load_checkpoint(checkpoint_path: Path, seed: int = 0):
+def load_checkpoint(checkpoint_path: Path, seed: int = 0, overrides=None):
     """Charge un checkpoint .npz et retourne (encoder, rssm, actor, meta)."""
     ckpt = np.load(checkpoint_path, allow_pickle=False)
     print(f"Loaded {len(ckpt.files)} keys from {checkpoint_path.name}")
@@ -203,7 +270,8 @@ def load_checkpoint(checkpoint_path: Path, seed: int = 0):
         except Exception as e:
             print(f"  meta : failed to read ({e})")
 
-    encoder, rssm, actor = build_modules(seed=seed)
+    arch = infer_arch(ckpt, meta, overrides)
+    encoder, rssm, actor = build_modules(arch, seed=seed)
 
     print("Loading params...")
     load_module_params(encoder, ckpt, prefix="encoder")
@@ -390,6 +458,19 @@ def main():
                         help="Seed for env + sampling")
     parser.add_argument("--render_size", type=int, default=512,
                         help="Resolution rendered (square, default 512). 64=native, 256/512/1024 upscale")
+    # Overrides d'architecture. Inutiles en general : elle est lue dans le .meta.json
+    # ou deduite des formes du checkpoint. Servent aux vieux checkpoints sans meta
+    # dont le decoupage z n'est pas 32 categories (v18 : 24x24).
+    for _k, _h in (("embed_dim", "sortie du CNN encoder"),
+                   ("h_dim", "taille du deter GRU"),
+                   ("z_categories", "nombre de variables categorielles z"),
+                   ("z_classes", "classes par variable z"),
+                   ("hidden_dim", "largeur MLP du RSSM"),
+                   ("cnn_depth", "canaux de base du CNN"),
+                   ("ac_hidden_dim", "largeur MLP actor"),
+                   ("ac_num_layers", "profondeur MLP actor")):
+        parser.add_argument(f"--{_k}", type=int, default=None,
+                            help=f"Override {_h} (defaut : auto).")
     args = parser.parse_args()
 
     checkpoint_path = Path(args.checkpoint)
@@ -401,7 +482,11 @@ def main():
 
     # ----- Load
     print(f"=== Loading checkpoint")
-    encoder, rssm, actor, meta = load_checkpoint(checkpoint_path, seed=args.seed)
+    overrides = {k: getattr(args, k) for k in (
+        "embed_dim", "h_dim", "z_categories", "z_classes",
+        "hidden_dim", "cnn_depth", "ac_hidden_dim", "ac_num_layers")}
+    encoder, rssm, actor, meta = load_checkpoint(
+        checkpoint_path, seed=args.seed, overrides=overrides)
     act_fn = make_act_fn(encoder, rssm, actor)
 
     # ----- Env
