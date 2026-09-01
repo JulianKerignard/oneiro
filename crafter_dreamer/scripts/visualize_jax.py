@@ -352,7 +352,12 @@ def play_episode(act_fn, rssm, env, key, deterministic=False, max_steps=500,
     inner_env = env._env if hasattr(env, "_env") else env
 
     for t in range(max_steps):
-        # Frame courante AVANT l'action (résolution custom via crafter render(size))
+        # Frame courante AVANT l'action (résolution custom via crafter render(size)).
+        # /!\ MESURÉ : `render_size` change la TRAJECTOIRE, pas seulement l'image.
+        # crafter.Env.render(size) consomme de l'état interne, donc deux rendus de
+        # tailles différentes divergent à seed identique (observé : seed 21 donne
+        # 224 steps en 256px et 308 en 64px, mêmes 13 achievements). Pour reproduire
+        # une démo à l'identique, fixer --seed ET --render_size.
         frame = inner_env.render(render_size)
         frames.append(frame)
 

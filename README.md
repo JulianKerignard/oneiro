@@ -6,16 +6,17 @@ A from-scratch reimplementation of [DreamerV3](https://arxiv.org/abs/2301.04104)
 
 **Beats Rainbow and PPO on the official Crafter scoreboard, with 3× fewer parameters than DreamerV3.**
 
-![agent](videos/oneiro_demo_opt.gif)
+![agent](videos/oneiro_v54_best.gif)
 
-*⚠️ This clip is stale — it shows the **v18** agent (~64k env steps, 5 achievements), from
-before the reward-convention fix described below. The current agent reaches 10.56
-achievements per episode. Regenerate from any checkpoint with:*
+*One episode, unedited, argmax policy — **13 of 22 achievements**. The agent collects wood
+(step 8), places a table (14), crafts a wood pickaxe (56), mines stone (120), places it (121),
+crafts a sword (138) and builds a furnace (150), while eating, drinking and sleeping to stay
+alive for 224 steps. Reproduce it with:*
 
 ```bash
 python crafter_dreamer/scripts/visualize_jax.py \
-    --checkpoint kaggle_outputs/<run>/checkpoints/<ckpt>.npz \
-    --output videos/demo.gif --n_episodes 3 --deterministic
+    --checkpoint kaggle_outputs/v54-rewardin-40k/checkpoints/dreamer_crafter_jax_v54-rewardin-40k_iter037500.npz \
+    --output videos/demo.gif --n_episodes 1 --deterministic --seed 21 --render_size 256
 ```
 
 *The architecture is read from the checkpoint (its `.meta.json`, or inferred from tensor
