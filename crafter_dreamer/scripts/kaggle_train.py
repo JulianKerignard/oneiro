@@ -33,7 +33,7 @@ import tempfile
 from pathlib import Path
 
 REPO_URL = "https://github.com/JulianKerignard/oneiro.git"
-BRANCH = "feat/tpu"  # archi rééquilibrée + buffer CPU + support TPU (--tpu)
+DEFAULT_BRANCH = "feat/tpu"   # branche de travail ; surchargeable via --branch
 
 # Le CLI `kaggle` vit à côté du python courant (venv), pas forcément dans le PATH.
 import shutil
@@ -100,7 +100,7 @@ def build_notebook(args) -> dict:
     # ne peut plus l'ouvrir → "Device busy". Le training affiche lui-même le
     # backend dans son header, donc pas de cellule de vérif séparée.
     cells = [
-        f"!rm -rf oneiro && git clone -b {BRANCH} {REPO_URL}",
+        f"!rm -rf oneiro && git clone -b {args.branch} {REPO_URL}",
         # FIX env (juil. 2026) : l'image Kaggle est passée à NumPy 2.x, mais le numba
         # tiré par opensimplex 0.4.5 référence np.row_stack (retiré en NumPy 2.0) → crash
         # à env.reset(). On force numba récent (compatible NumPy 2, sans row_stack).
@@ -155,6 +155,7 @@ def cmd_launch(args):
         json.dumps(kernel_metadata(user, slug, args.tpu, resume_from_kernel=resume_slug), indent=2))
     accel = "TPU v5e-8" if args.tpu else "GPU P100"
     print(f"Kernel   : {user}/{slug}")
+    print(f"Branche  : {args.branch}")
     if resume_slug:
         print(f"Resume   : depuis l'output de {user}/{resume_slug} (checkpoint iter le plus avancé)")
     print(f"Config   : {args.train_iter} iter, buffer {args.buffer_device} {args.buffer_capacity:,}")
@@ -196,6 +197,10 @@ def main():
     pl.add_argument("--wm-train-per-iter", type=int, default=4)
     pl.add_argument("--n-envs", type=int, default=16)
     pl.add_argument("--batch-size", type=int, default=16)
+    pl.add_argument("--branch", default=DEFAULT_BRANCH,
+                    help=f"Branche clonee par le kernel (defaut {DEFAULT_BRANCH}). "
+                         "Le launcher clone depuis GitHub, donc POUSSER avant de lancer : "
+                         "un commit local non pousse ne sera pas dans le run.")
     pl.add_argument("--tpu", action="store_true", default=False,
                     help="Cible TPU v5e-8 (jax[tpu], 1 core) au lieu de GPU P100.")
     pl.add_argument("--buffer-device", choices=["gpu", "cpu"], default="cpu")
