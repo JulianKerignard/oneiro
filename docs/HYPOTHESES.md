@@ -331,60 +331,77 @@ classement des tailles et le prioritized replay de v43.
 steps (~9 h estimées à ~0.78 ips, extrapolé du couple v26→v27b où ×4 de ratio coûtait ÷3.3
 de vitesse).
 
-**Statut** : ✗ **INVALIDÉE sur l'effet — mais le MÉCANISME est confirmé**
+**Statut** : ⚠️ **PARTIELLEMENT VALIDÉE** — le ratio 256 double la sample efficiency
+dans le régime PRÉCOCE, mais ne déplace pas l'asymptote et ne débloque pas le mur.
 
-**Résultat v56** (25 000 iter = 0.80M env steps, archi 14.4M, seed 42) :
+> Rectificatif du 2026-09-02 : la première version de ce verdict concluait « invalidée »
+> en comparant v56 à 0.80M env steps à v55 à **1.28M**. C'est une comparaison à budget
+> d'env steps DIFFÉRENT, donc invalide pour juger de la sample efficiency — la seule
+> chose qu'elle mesure est le rendement par heure de TPU. À budget d'env steps apparié,
+> le ratio 256 est **meilleur**, pas neutre.
 
-| @25000 iter | ratio 256 | ratio 128 (v55) |
-|---|---|---|
-| achievements | **6.67** | 6.71 |
+**Sample efficiency — budget d'env steps pour atteindre un niveau donné** [mesuré] :
 
-Le critère posé avant le run (`> 7.5` pour valider) n'est pas atteint : **−0.04**, soit
-rien du tout.
+| niveau | ratio 256 | ratio 128 | gain |
+|---|---|---|---|
+| 4.5 ach | **0.08M** | 0.24M | **3.0×** |
+| 5.0 ach | **0.16M** | 0.32M | **2.0×** |
+| 5.5 ach | **0.24M** | 0.40M | 1.67× |
+| 6.0 ach | 0.56M | 0.56M | **1.00×** |
+| 6.5 ach | 0.64M | 0.72M | 1.12× |
+| 7.0 ach | 0.72M | 0.88M | 1.22× |
 
-**Ce qui a MARCHÉ — la reward head apprend mieux, exactement comme prédit** :
+Le gain est **massif au début** (3× à 4.5 ach) puis s'éteint : à 6.0 les deux runs sont
+au même budget exactement, et au-delà l'avantage plafonne à ~1.1-1.2× sans se creuser.
+v56 était devant sur 9 points appariés sur 10 (écart moyen +0.46 ach), avec un maximum
+de +1.03 à 0.08M et 0.16M, refermé à −0.04 à 0.80M.
+
+Lecture : tôt, les données sont rares et les rejouer davantage aide réellement. Passé
+~0.56M, le buffer contient assez de diversité pour que le facteur limitant devienne **ce
+que l'agent rencontre**, pas combien de fois il le revoit. Le système bascule de
+*gradient-limited* à *data-limited*.
+
+**Le mécanisme prédit est confirmé** :
 
 | | ratio 128 | ratio 256 |
 |---|---|---|
 | `rew@ach` | 0.850 | **0.900** |
 | `rew@0` | 0.0024 | **0.0011** |
+| `img_rew_frac_hi` | — | **plus haut** |
 
-Le mécanisme invoqué est donc réel : doubler le replay améliore bien la prédiction des
-achievements rares et réduit le leakage. **Mais ça ne se transforme pas en comportement.**
-Le signal fin bougeait dans le bon sens sans que le score suive — un cas d'école de
-métrique intermédiaire qui progresse pour rien.
+Doubler le replay améliore la prédiction des achievements rares, réduit le leakage et
+met plus de récompense dans l'imagination. **Tous les diagnostics du world model sont
+meilleurs.** Et pourtant l'asymptote comportementale ne bouge pas — ce qui établit un
+résultat utile en soi : **le goulot n'est pas la qualité du modèle de récompense.**
 
-**Ce qui a NUI — le coût en env steps** :
+**Ce que ça coûte — en temps de calcul, pas en échantillons** :
 
-| | durée | iter | env steps | achievements | ach/heure |
+| | durée | iter | env steps atteints | ach final | ach/heure |
 |---|---|---|---|---|---|
 | ratio 128 | 8.1 h | 40 000 | **1.28M** | **8.89** | **1.10** |
 | ratio 256 | 8.4 h | 25 000 | 0.80M | 6.67 | 0.79 |
 
-À budget de calcul quasi identique, le ratio 128 collecte **60% d'env steps en plus** et
-finit 2.2 achievements devant. Sur Crafter, qui est un benchmark de *sample efficiency*
-mesuré à budget d'env steps fixe, cet arbitrage est perdant : le temps passé à rejouer
-n'est pas du temps passé à explorer.
+À durée de session égale, le ratio 256 atteint 1.6× moins d'env steps. Sur un quota TPU
+limité et pour un run visant le budget benchmark de 1M, c'est perdant. Mais c'est un
+arbitrage de **wall-clock**, à ne pas confondre avec la sample efficiency ci-dessus.
 
-**Nuance honnête** : v56 était devant sur **9 points appariés sur 10** (écart moyen
-+0.46 ach), avec un avantage maximal tôt (+1.03 à 0.08M et 0.16M) qui se referme
-complètement à la fin. Plus de replay accélère donc le *démarrage*, quand les données
-sont rares — mais ne déplace pas l'asymptote. C'est cohérent avec un système
-data-limited, pas gradient-limited.
+**Le mur n'a pas bougé** : à budget apparié, `make_wood_pickaxe`, `collect_stone`,
+`place_stone` et `collect_coal` sont à **0% dans les deux runs**.
 
-**Le mur n'a pas bougé** : à itération appariée, `make_wood_pickaxe`, `collect_stone`,
-`place_stone` et `collect_coal` sont à **0% dans les deux runs**. Le ratio ne débloque
-rien de la chaîne profonde.
+**Conséquence pour l'énoncé de H_318** : l'amorçage statistique n'explique pas le mur.
+Un événement à 0.06% reste à 0.06% qu'on le rejoue 128 ou 256 fois — le problème est
+qu'il ne **survient** pas, pas qu'il soit sous-exploité. Le levier est du côté de ce qui
+ferait *advenir* la conjonction (bois + pierre + près d'une table).
 
-**Conséquence pour H_318** : l'amorçage statistique n'est pas (ou pas seulement) une
-question de nombre de pas de gradient. Un événement à 0.06% reste à 0.06% qu'on le
-rejoue 128 ou 256 fois — le problème est qu'il ne se **produit** pas, pas qu'il soit
-sous-exploité. Le levier reste à trouver du côté de ce qui ferait *survenir* la
-conjonction (bois + pierre + près d'une table), pas de ce qui l'exploiterait mieux.
-
-**Ne pas re-tester le ratio 512** : il coûterait 4× le ratio 128 pour, par extrapolation
-de cette courbe, un asymptote identique. Cette fois la conclusion tient — elle est
-mesurée APRÈS le fix de convention, contrairement à celles de v25/v27b/v46.
+**Recommandation pratique** :
+- **Runs de production** visant 1M+ env steps → garder **ratio 128** (meilleur rendement
+  par heure de quota).
+- **Probes courts** pour trancher une hypothèse (0.2-0.3M env steps) → utiliser
+  **ratio 256** : 2 à 3× moins d'env steps pour le même point, donc un verdict plus vite.
+- **Ratio 512 non testé et non prioritaire** : l'extrapolation de cette courbe suggère le
+  même asymptote pour 4× le coût. Contrairement aux conclusions de v25/v27b/v46 (mesurées
+  sous le bug de convention), celle-ci est postérieure au fix — mais elle reste une
+  extrapolation, pas une mesure.
 
 <details><summary>Critère posé avant le run (archivé)</summary>
 
