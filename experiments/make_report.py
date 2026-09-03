@@ -78,7 +78,13 @@ def describe_arch(run: str, config: dict) -> str:
         except Exception:
             pass
     size = f"{n_params / 1e6:.1f}M" if n_params else "?"
-    return f"{run}  —  {size} params  (deter {h_dim or '?'}, cnn {cnn or '?'})"
+    # Le replay ratio est souvent LA variable entre deux runs de meme archi : sans lui,
+    # deux etiquettes identiques rendraient la legende inutile.
+    # Formule de train_dreamer_jax.py:1633 : batch * seq_len * wm_train / collected.
+    wm = config.get("wm_train_per_iter")
+    bs = config.get("batch_size", 16)
+    ratio = f", ratio {int(bs * 64 * wm / 32)}" if wm else ""
+    return f"{run}  —  {size} params  (deter {h_dim or '?'}, cnn {cnn or '?'}{ratio})"
 
 
 def load(run: str) -> dict:
@@ -228,6 +234,43 @@ def page_internals(pdf, runs):
     plt.close(fig)
 
 
+def page_reward_diagnostics(pdf, runs):
+    """Diagnostics reward head + imagination. Absents des runs anterieurs a da09328."""
+    have = [d for d in runs if "rew_pred_ach" in d["history"]]
+    if not have:
+        return
+    panels = [
+        ("rew_pred_ach", "Prediction sur les ACHIEVEMENTS (cible ~1.0)", None),
+        ("rew_pred_zero", "Prediction sur les etats a reward NUL (doit rester ~0)", 0.005),
+        ("rew_n_ach", "Achievements par batch (densite du replay)", None),
+        ("img_rew_max", "Reward MAX dans l'imagination", None),
+        ("img_rew_frac_hi", "Fraction des rewards imagines > 0.5", None),
+        ("img_rew_mean", "Reward moyen dans l'imagination", None),
+    ]
+    fig, axes = plt.subplots(2, 3, figsize=(13, 6.2), dpi=150)
+    for ax, (key, title, target) in zip(axes.flat, panels):
+        for d, col in zip(have, PALETTE):
+            if key in d["history"]:
+                ax.plot(it_steps(d), d["history"][key], lw=0.9, color=col, alpha=0.9)
+        if target is not None:
+            ax.axhline(target, color="k", ls=":", lw=1, alpha=0.6)
+            ax.text(0.99, target, f" cible {target} ", fontsize=6, ha="right", va="bottom",
+                    transform=ax.get_yaxis_transform())
+        ax.set_title(title, fontsize=9)
+        ax.grid(alpha=0.25)
+        ax.tick_params(labelsize=7)
+        ax.set_xlabel("env steps (M)", fontsize=8)
+    handles = [plt.Line2D([], [], color=c, lw=2, label=d["_label"])
+               for d, c in zip(have, PALETTE)]
+    fig.legend(handles=handles, fontsize=8, loc="lower center", ncol=len(have),
+               frameon=False, bbox_to_anchor=(0.5, -0.01))
+    fig.suptitle("Diagnostics reward head et imagination — le signal que voit l'actor",
+                 fontsize=13)
+    fig.tight_layout(rect=(0, 0.04, 1, 0.95))
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -244,6 +287,7 @@ def main():
         page_chain(pdf, runs)
         page_spectrum(pdf, runs)
         page_internals(pdf, runs)
+        page_reward_diagnostics(pdf, runs)
         meta = pdf.infodict()
         meta["Title"] = "Oneiro — courbes d'apprentissage sur Crafter"
         meta["Subject"] = ", ".join(d["run_name"] for d in runs)
