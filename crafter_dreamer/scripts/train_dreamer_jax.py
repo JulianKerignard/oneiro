@@ -1799,6 +1799,18 @@ def main():
     # (les Variables nnx sont partagées : muter les modules ici suffit,
     # le nnx.split de make_functional_train_steps capturera les poids chargés).
     start_iter = 0
+    # Garde : demander une reprise et repartir de zero en silence est le pire des
+    # comportements — c'est ce qui a coute 12h de TPU sur v57, ou le launcher passait
+    # `--resume_from ""` (chaine vide, donc falsy) apres un glob infructueux.
+    # Si le flag est present mais inexploitable, on ARRETE.
+    if args.resume_from is not None:
+        _rp = str(args.resume_from).strip()
+        if not _rp:
+            sys.exit("ERREUR : --resume_from est vide. Une reprise a ete demandee mais "
+                     "aucun checkpoint n'a ete resolu — refus de repartir de zero.")
+        if not Path(_rp).is_file():
+            sys.exit(f"ERREUR : --resume_from introuvable : {_rp}")
+        args.resume_from = _rp
     if args.resume_from:
         start_iter = load_checkpoint_into_modules(args.resume_from, {
             "encoder": encoder, "rssm": rssm, "decoder": decoder,

@@ -78,11 +78,24 @@ def build_notebook(args) -> dict:
     train_cmd = "python -u crafter_dreamer/scripts/train_dreamer_jax.py " + " ".join(flags)
     # RESUME : le kernel précédent (kernel_sources) est monté sous /kaggle/input/<slug>/.
     # On reprend le checkpoint iterXXXXXX le plus avancé (zero-padded → tri lexical OK).
-    # Fail-fast : si aucun checkpoint trouvé, le && court-circuite et le train ne part pas.
     train_prefix = ""
     if getattr(args, "resume_from_kernel", None):
-        train_prefix = ('CKPT=$(ls -1 /kaggle/input/*/checkpoints/*iter*.npz 2>/dev/null | sort | tail -1) && '
-                        'echo "RESUME depuis $CKPT" && ')
+        # /!\ L'ancienne version faisait :
+        #     CKPT=$(ls ... | sort | tail -1) && echo ... && <train>
+        # en croyant que le && court-circuitait si aucun checkpoint n'etait trouve.
+        # FAUX : le code de sortie d'un pipeline est celui de sa DERNIERE commande
+        # (`tail`), qui reussit toujours, meme sur une entree vide. CKPT restait donc
+        # vide, `--resume_from ""` etait passe, argparse le rendait falsy cote Python,
+        # et le run REDEMARRAIT DE ZERO en silence. Constate sur v57 : 12h de TPU
+        # brulees a reentrainer depuis l'iteration 0.
+        # On teste donc explicitement que le fichier existe, et on sort en erreur sinon.
+        train_prefix = (
+            'CKPT=$(ls -1 /kaggle/input/*/checkpoints/*iter*.npz 2>/dev/null | sort | tail -1); '
+            'if [ -z "$CKPT" ] || [ ! -f "$CKPT" ]; then '
+            'echo "ERREUR: aucun checkpoint sous /kaggle/input/*/checkpoints/ — '
+            'le kernel source est-il bien monte ? Contenu de /kaggle/input :"; '
+            'ls -la /kaggle/input/ 2>&1; exit 1; fi; '
+            'echo "RESUME depuis $CKPT"; ')
         train_cmd += ' --resume_from "$CKPT"'
 
     # JAX backend selon l'accélérateur : cuda12 pour GPU, tpu pour TPU v5e-8.
