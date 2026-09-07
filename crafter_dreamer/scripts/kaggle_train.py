@@ -76,8 +76,11 @@ def build_notebook(args) -> dict:
     if args.extra_args:
         flags.append(args.extra_args)
     train_cmd = "python -u crafter_dreamer/scripts/train_dreamer_jax.py " + " ".join(flags)
-    # RESUME : le kernel précédent (kernel_sources) est monté sous /kaggle/input/<slug>/.
-    # On reprend le checkpoint iterXXXXXX le plus avancé (zero-padded → tri lexical OK).
+    # RESUME : l'output du kernel cité dans kernel_sources est monté sous
+    # /kaggle/input/notebooks/<slug>/ — et NON /kaggle/input/<slug>/ comme la doc
+    # le laisse croire (vérifié sur le probe v57b : /kaggle/input ne contient qu'un
+    # répertoire `notebooks`). On reprend le checkpoint iterXXXXXX le plus avancé
+    # (zero-padded → tri lexical OK).
     train_prefix = ""
     if getattr(args, "resume_from_kernel", None):
         # /!\ L'ancienne version faisait :
@@ -89,12 +92,15 @@ def build_notebook(args) -> dict:
         # et le run REDEMARRAIT DE ZERO en silence. Constate sur v57 : 12h de TPU
         # brulees a reentrainer depuis l'iteration 0.
         # On teste donc explicitement que le fichier existe, et on sort en erreur sinon.
+        # `find` plutot qu'un glob a profondeur fixe : le layout de montage cote
+        # Kaggle n'est pas garanti (cf. le commentaire au-dessus), et un glob qui
+        # rate d'un niveau est exactement ce qui a coute 12h sur v57.
         train_prefix = (
-            'CKPT=$(ls -1 /kaggle/input/*/checkpoints/*iter*.npz 2>/dev/null | sort | tail -1); '
+            "CKPT=$(find /kaggle/input -name '*iter*.npz' 2>/dev/null | sort | tail -1); "
             'if [ -z "$CKPT" ] || [ ! -f "$CKPT" ]; then '
-            'echo "ERREUR: aucun checkpoint sous /kaggle/input/*/checkpoints/ — '
-            'le kernel source est-il bien monte ? Contenu de /kaggle/input :"; '
-            'ls -la /kaggle/input/ 2>&1; exit 1; fi; '
+            'echo "ERREUR: aucun checkpoint *iter*.npz sous /kaggle/input — '
+            'le kernel source est-il bien monte ? Arborescence :"; '
+            'find /kaggle/input -maxdepth 3 2>&1 | head -40; exit 1; fi; '
             'echo "RESUME depuis $CKPT"; ')
         train_cmd += ' --resume_from "$CKPT"'
 
