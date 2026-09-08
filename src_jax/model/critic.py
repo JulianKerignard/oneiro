@@ -9,7 +9,7 @@ Pour la loss au training      : critic.loss(state, returns_target).
 
 Avantages vs MSE simple :
   - Gradient stable même quand les returns ont une grande dynamique
-  - Pas d'explosion sur les rewards rares (line clears Tetris)
+  - Pas d'explosion sur les rewards rares (achievements Crafter)
   - Standard DreamerV3, prouvé robuste sur 150+ envs sans tuning
 
 Note Flax NNX : self.bins est un tableau JAX simple (non-paramètre, non-tracé
@@ -35,15 +35,25 @@ class Critic(nnx.Module):
         state_dim: int = 384,
         hidden_dim: int = 256,
         n_bins: int = N_BINS,
+        num_layers: int = 2,
         *,
         rngs: nnx.Rngs,
     ):
         self.n_bins = n_bins
+        self.num_layers = num_layers
 
-        self.linear1 = nnx.Linear(state_dim, hidden_dim, rngs=rngs)
-        self.norm1 = nnx.LayerNorm(hidden_dim, epsilon=1e-5, rngs=rngs)
-        self.linear2 = nnx.Linear(hidden_dim, hidden_dim, rngs=rngs)
-        self.norm2 = nnx.LayerNorm(hidden_dim, epsilon=1e-5, rngs=rngs)
+        # Pile de num_layers blocs (Linear → LayerNorm → SiLU), réf dreamerv3-flax
+        # (mlp.py : MLP profond avant la tête). SiLU = activation projet.
+        # nnx.data() : NNX >=0.12 traite un list brut comme statique → on l'enveloppe
+        # pour que les sous-modules soient bien tracés/comptés par l'optimiseur.
+        linears, norms = [], []
+        in_dim = state_dim
+        for _ in range(num_layers):
+            linears.append(nnx.Linear(in_dim, hidden_dim, rngs=rngs))
+            norms.append(nnx.LayerNorm(hidden_dim, epsilon=1e-5, rngs=rngs))
+            in_dim = hidden_dim
+        self.linears = nnx.data(linears)
+        self.norms = nnx.data(norms)
         self.out = nnx.Linear(hidden_dim, n_bins, rngs=rngs)
 
         # Zero init paper DreamerV3 (outscale=0.0) : évite bootstrap aléatoire
@@ -57,8 +67,9 @@ class Critic(nnx.Module):
 
     def __call__(self, state: jax.Array) -> jax.Array:
         """Returns raw logits over n_bins."""
-        x = jax.nn.silu(self.norm1(self.linear1(state)))
-        x = jax.nn.silu(self.norm2(self.linear2(x)))
+        x = state
+        for linear, norm in zip(self.linears, self.norms):
+            x = jax.nn.silu(norm(linear(x)))
         return self.out(x)
 
     def predict(self, state: jax.Array) -> jax.Array:

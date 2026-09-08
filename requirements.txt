@@ -1,22 +1,26 @@
-# ===== Core JAX stack (current implementation: src_jax/ + crafter_dreamer/) =====
-# CPU by default; use jax[cuda12]==0.10.1 for GPU training
+# ===== Core JAX stack (src_jax/ + crafter_dreamer/) =====
+# CPU by default. For accelerators, install the matching wheel INSTEAD of plain jax:
+#   GPU : pip install -U "jax[cuda12]==0.10.1"
+#   TPU : pip install -U "jax[tpu]==0.10.1" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 jax==0.10.1
 flax==0.12.7
 optax==0.2.8
-distrax==0.1.8
 chex==0.1.91
-orbax-checkpoint==0.12.0
 
 # ===== Environment + utils =====
 numpy>=2.0
-matplotlib==3.9.2
-Pillow==10.4.0
+matplotlib>=3.9
+Pillow>=10.4
 crafter==1.8.3
 opensimplex==0.4.5
 ruamel.yaml==0.18.6
+# numba is pulled in by opensimplex; 0.60+ is required on NumPy 2.x
+# (older versions reference np.row_stack, removed in NumPy 2.0 → crash at env.reset()).
+numba>=0.60
 
-# ===== Cloud training (optional) =====
-modal
+# ===== Cloud training (Kaggle TPU launcher) =====
+kaggle>=1.6
 
-# ===== Legacy PyTorch reference implementation (src/) =====
-# torch>=2.2  # uncomment to run the original PyTorch version (MPS on Apple Silicon)
+# ===== Optional: PyTorch reference implementation (src/) =====
+# Only needed to run the PyTorch↔JAX parity checks in crafter_dreamer/scripts/test_*.py
+# torch>=2.2

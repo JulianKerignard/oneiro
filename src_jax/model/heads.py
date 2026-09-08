@@ -138,21 +138,35 @@ class RewardHead(nnx.Module):
         logits = self(state)
         return twohot_decode(logits, self.bins)
 
-    def loss(self, state: jax.Array, target: jax.Array) -> jax.Array:
+    def loss(self, state: jax.Array, target: jax.Array, rare_weight: float = 1.0) -> jax.Array:
         """
-        Cross-entropy entre logits prédits et twohot(target).
+        Cross-entropy pondérée entre logits prédits et twohot(target).
 
         Args:
-            state  : (..., state_dim)
-            target : (...,) scalaires en espace original
+            state       : (..., state_dim)
+            target      : (...,) scalaires en espace original
+            rare_weight : poids sur les ACHIEVEMENTS (|reward| > 0.5) UNIQUEMENT.
+                          Contre le déséquilibre de classes (les +1 = ~1.4% des transitions)
+                          qui fait sous-prédire les achievements rares. rare_weight=1.0 → off.
 
         Returns:
-            loss scalaire (moyenne sur le batch)
+            loss scalaire (moyenne pondérée sur le batch)
+
+        NOTE seuil 0.5 (fix v44) : le seuil initial 0.01 pondérait AUSSI la santé (±0.1,
+        ~3.7% des transitions, 2.7× plus fréquente que les achievements) → masse pondérée
+        3.6× trop grande → la CE ×10 « fuyait » de la masse positive sur les états voisins
+        à reward nul (biais mesuré rew@0 ≈ +0.015) → composé par γ=0.997, le critic gonflait
+        de biais/(1−γ) ≈ +5 → scale (P95−P5 des returns) 2.7→7.7 → advantages des vrais +1
+        écrasés ÷2.5 → le PG ne consolidait jamais les comportements rares (place_table).
+        Avec le seuil 0.5, seule la population visée (les +1) est pondérée ; la santé
+        revient à poids 1 (comme v26, scale sain 3.1).
         """
         logits = self(state)
         target_twohot = jax.lax.stop_gradient(twohot_encode(target, self.bins))
         log_probs = jax.nn.log_softmax(logits, axis=-1)
-        return -(target_twohot * log_probs).sum(-1).mean()
+        ce = -(target_twohot * log_probs).sum(-1)                      # (...,) CE par transition
+        weights = jnp.where(jnp.abs(target) > 0.5, rare_weight, 1.0)   # rare_weight sur achievements SEULS
+        return (ce * weights).sum() / weights.sum()                    # moyenne pondérée
 
 
 # ============================== ContinueHead (BCE)

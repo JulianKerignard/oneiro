@@ -47,12 +47,11 @@ ACTION_NAMES = (
     "make_wood_sword", "make_stone_sword", "make_iron_sword",
 )
 
-# Anti sleep/noop spam (corrige le mode collapse "agent dort en boucle")
+# Indices d'actions utiles au diagnostic (l'anti-spam sleep/noop a été retiré :
+# désactivé depuis v14 car il interférait avec les hyperparams du paper, et la
+# machinerie tournait à chaque step pour une pénalité toujours nulle).
 NOOP_ACTION_IDX = 0
 SLEEP_ACTION_IDX = 6
-SPAM_THRESHOLD = 3          # gardé pour compat mais ineffectif si SPAM_PENALTY = 0
-SPAM_PENALTY = 0.0          # DÉSACTIVÉ pour v14 : interférait avec hyperparams paper
-                             # Le sleep spam sera géré par adaptive_alpha + auto_explore à la place
 
 
 class CrafterEnv:
@@ -68,26 +67,34 @@ class CrafterEnv:
             seed   : seed du RNG (optionnel)
             length : max episode steps (défaut 10000, comme Crafter standard)
         """
+        self._length = length          # conservé : reset(seed=) recrée l'env et doit le repasser
         self._env = crafter.Env(seed=seed, length=length)
         self._episode_step = 0
         self._unlocked_this_episode = set()
         self._cached_mask = np.ones(ACTION_DIM, dtype=bool)   # toutes valides toujours
-        # Tracking anti-spam (sleep/noop)
-        self._consecutive_sleep = 0
-        self._consecutive_noop = 0
+        # DIAGNOSTIC : max d'inventaire atteint dans l'épisode + tentatives par action.
+        # Le gate du craft est ARITHMÉTIQUE (data.yaml) : place_table coûte wood=2,
+        # make_wood_pickaxe wood=1+table, collect_stone exige la pioche → ≥3 bois.
+        # Or collect_wood ne donne +1 qu'UNE fois : les bois 2 et 3 ne rapportent RIEN.
+        # Sans ces compteurs, impossible de distinguer "n'essaie pas" / "essaie mais
+        # n'a pas les ressources" / "a les ressources mais l'action échoue".
+        self._inv_max = {}
+        self._action_counts = np.zeros(ACTION_DIM, dtype=np.int64)
 
     # ============================================================== gym API
 
     def reset(self, seed=None):
         """Reset l'env, retourne obs (3, 64, 64) float32."""
         if seed is not None:
-            # Crafter ne supporte pas seed dynamique : recréer l'env
-            self._env = crafter.Env(seed=seed)
+            # Crafter ne supporte pas seed dynamique : recréer l'env.
+            # /!\ repasser `length` — sans lui l'env repartait sur le défaut 10000
+            # et un env construit avec une autre durée la perdait silencieusement.
+            self._env = crafter.Env(seed=seed, length=self._length)
         obs = self._env.reset()
         self._episode_step = 0
         self._unlocked_this_episode = set()
-        self._consecutive_sleep = 0
-        self._consecutive_noop = 0
+        self._inv_max = {}
+        self._action_counts[:] = 0
         return self._normalize_obs(obs)
 
     def step(self, action):
@@ -96,37 +103,24 @@ class CrafterEnv:
         obs, reward, done, info = self._env.step(action_int)
         self._episode_step += 1
 
+        # DIAGNOSTIC : max d'inventaire vu + histogramme des actions tentées
+        if 0 <= action_int < ACTION_DIM:
+            self._action_counts[action_int] += 1
+        for item, qty in (info.get("inventory") or {}).items():
+            if qty > self._inv_max.get(item, 0):
+                self._inv_max[item] = int(qty)
+
         # Tracker les achievements DÉCROCHÉS pendant cet episode
         achievements = info.get("achievements", {})
         for name, val in achievements.items():
             if val > 0 and name not in self._unlocked_this_episode:
                 self._unlocked_this_episode.add(name)
 
-        # === Pénalité anti-spam (sleep / noop)
-        # L'agent peut spam SLEEP pour rester en vie + récolter wake_up.
-        # On pénalise les actions identiques consécutives au-delà de SPAM_THRESHOLD.
-        # Le wake_up achievement reste intact (donné par Crafter).
-        spam_penalty = 0.0
-        if action_int == SLEEP_ACTION_IDX:
-            self._consecutive_sleep += 1
-            self._consecutive_noop = 0
-            if self._consecutive_sleep > SPAM_THRESHOLD:
-                spam_penalty = SPAM_PENALTY * (self._consecutive_sleep - SPAM_THRESHOLD)
-        elif action_int == NOOP_ACTION_IDX:
-            self._consecutive_noop += 1
-            self._consecutive_sleep = 0
-            if self._consecutive_noop > SPAM_THRESHOLD:
-                spam_penalty = SPAM_PENALTY * (self._consecutive_noop - SPAM_THRESHOLD)
-        else:
-            self._consecutive_sleep = 0
-            self._consecutive_noop = 0
-
         # info enrichi pour les stats agent
         info["n_achievements_episode"] = len(self._unlocked_this_episode)
         info["invalid"] = False    # Crafter n'a pas d'action invalide
-        info["spam_penalty"] = spam_penalty
 
-        return self._normalize_obs(obs), float(reward - spam_penalty), bool(done), info
+        return self._normalize_obs(obs), float(reward), bool(done), info
 
     # ============================================================== action mask
 
@@ -162,6 +156,16 @@ class CrafterEnv:
     def unlocked_names(self):
         """Noms des achievements débloqués sur l'episode courant (copie)."""
         return set(self._unlocked_this_episode)
+
+    @property
+    def inv_max(self):
+        """Max d'inventaire atteint dans l'épisode courant (dict item → qty)."""
+        return dict(self._inv_max)
+
+    @property
+    def action_counts(self):
+        """Histogramme des actions tentées dans l'épisode courant (copie)."""
+        return self._action_counts.copy()
 
 
 __all__ = [

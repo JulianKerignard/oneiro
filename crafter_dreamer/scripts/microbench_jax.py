@@ -14,7 +14,7 @@ Sections benchmarkées (en ordre d'intérêt) :
   6. train_ac    : un step d'AC jit
 
 Le ratio relatif de ces mesures sur CPU est représentatif (à un facteur près)
-de ce qu'on observerait sur Modal L4 GPU pour les sections CPU-bound
+de ce qu'on observerait sur accélérateur pour les sections CPU-bound
 (env.step, transfer). Les sections GPU-bound (train_wm/ac) seront plus rapides
 sur GPU L4 que sur Mac CPU, mais la **collecte env reste séquentielle**
 et donc le ratio collecte/total grandit sur GPU.

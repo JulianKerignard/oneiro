@@ -201,7 +201,11 @@ def main():
         x = jnp.ones((BATCH, STATE_DIM_P2))
         out = cnn_dec(x)
         check(out.shape == (BATCH, 3, 64, 64), f"shape 2D : {out.shape}")
-        check(float(out.min()) >= 0.0 and float(out.max()) <= 1.0, "values in [0,1] (sigmoid)")
+        # Sortie LINÉAIRE + 0.5 (DreamerV3 canonique) depuis le fix WM pixel-latent :
+        # plus de sigmoid, donc pas de borne [0,1]. On vérifie que la sortie est
+        # centrée autour de 0.5 et finie (le réseau apprend obs - 0.5).
+        check(bool(jnp.all(jnp.isfinite(out))), "sortie finie")
+        check(abs(float(out.mean()) - 0.5) < 2.0, f"sortie centrée ~0.5 : mean={float(out.mean()):.3f}")
 
         x3 = jnp.ones((BATCH, SEQ, STATE_DIM_P2))
         out3 = cnn_dec(x3)

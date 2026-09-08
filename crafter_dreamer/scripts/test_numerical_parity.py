@@ -1,9 +1,22 @@
 """
-Test de parité numérique RIGOUREUX entre PyTorch et JAX.
+DIAGNOSTIC HISTORIQUE — parité numérique PyTorch ↔ JAX.
+
+ATTENTION : CE N'EST PLUS UN TEST. Malgré son nom (conservé : docs/HYPOTHESES.md y renvoie),
+il ne doit PAS être lu comme une suite à faire passer. L'implémentation JAX a
+délibérément divergé de la référence PyTorch de `src/`, qui n'est plus maintenue et
+portait elle-même les bugs corrigés depuis. Divergences volontaires actuelles :
+
+  - CustomGRUCell : `use_bias=False` + LayerNorm sur les gates (aligné symoon11 /
+    DreamerV3), là où PyTorch nn.GRUCell a deux biais et aucune norme.
+  - CNNDecoder    : sortie linéaire + 0.5, plus de sigmoid (fix WM pixel-latent).
+  - RewardHead    : convention ENTRANTE, cible décalée d'un cran (H_316).
+
+Un écart sur ces modules est donc ATTENDU ; seul l'encoder devrait encore matcher.
+Méta-leçon du projet (M_003) : la parité numérique ne garantit pas la correctness —
+la baseline PyTorch était elle-même buguée. C'est ce fichier qui l'a démontré, d'où
+sa conservation. Nécessite `torch` (commenté dans requirements.txt).
 
 Charge weights PyTorch → copie dans JAX → compare outputs avec mêmes inputs.
-
-Si les outputs divergent : on a un BUG d'implémentation quelque part.
 
 Conventions à mapper (sources fréquentes de bugs) :
     - PyTorch nn.Linear(in, out).weight : shape (out, in)
@@ -380,29 +393,25 @@ def main():
     n_ok = sum(1 for _, ok in results if ok)
     print(f"\n  {n_ok}/{len(results)} modules en parite numerique.")
 
-    print("\n" + "=" * 64)
-    print("BUGS IDENTIFIES")
+    print("BUGS HISTORIQUES — tous corriges, conserves comme trace")
     print("=" * 64)
     print("""
-  1. ENCODER — Flatten order incompatible (BUG MAJEUR)
-     - PyTorch : conv4 output (B, C=256, H=4, W=4) -> reshape(B, -1) = ordre C-H-W
-     - JAX     : conv4 output (B, H=4, W=4, C=256) -> reshape(B, -1) = ordre H-W-C
-     - Le LinearProj voit donc des features dans un ordre DIFFERENT.
-     - FIX : transposer NHWC -> NCHW AVANT flatten dans src_jax/model/encoder.py
-       x = jnp.transpose(x, (0, 3, 1, 2))  # NHWC -> NCHW pour matcher PyTorch
-       x = x.reshape(x.shape[0], -1)
+  Les trois defauts que ce diagnostic avait reveles en juin 2026 sont traites :
 
-  2. RSSM GRU — bias_hh manquant (BUG STRUCTUREL)
-     - PyTorch nn.GRUCell : bias_ih + bias_hh (deux biases additionnes dans le gate)
-     - Flax NNX GRUCell   : dense_h.use_bias=False -> SEUL bias_ih existe
-     - Resultat : Flax calcule un GRU MATHEMATIQUEMENT different.
-     - FIX : reimplementer une GRUCell custom (avec deux biases) OU s'assurer que
-       l'init PyTorch pose bias_hh=0 (mais ce n'est pas le default).
+  1. ENCODER — ordre du flatten (NHWC vs NCHW).  [CORRIGE]
+     PyTorch aplatissait en C-H-W, JAX en H-W-C : le LinearProj voyait les features
+     dans un ordre different. Fix : transpose NHWC -> NCHW avant le flatten.
 
-  3. LayerNorm epsilon (mineur)
-     - PyTorch : 1e-5
-     - Flax    : 1e-6
-     - Impact petit mais cumulable. Aligner via nnx.LayerNorm(..., epsilon=1e-5).
+  2. RSSM GRU — bias_hh manquant.  [DEPASSE, plus applicable]
+     A l'epoque, Flax nnx.GRUCell n'avait qu'un biais la ou PyTorch en a deux. Une
+     CustomGRUCell PyTorch-compatible avait ete ecrite, puis REMPLACEE par la variante
+     DreamerV3 (use_bias=False + LayerNorm sur les gates). Un ecart sur le RSSM est
+     desormais volontaire.
+
+  3. LayerNorm epsilon (1e-6 vs 1e-5).  [CORRIGE]  Aligne a 1e-5 partout.
+
+  Un FAIL sur RSSM / decoder / reward head n'indique donc PAS un bug : c'est la
+  divergence assumee decrite en tete de fichier.
 """)
 
 

@@ -623,6 +623,31 @@ v20 et v20b ont **la même config ET le même seed (42)** : v20 = 0.00 @ 1500, v
 
 ---
 
+## v23/v24 — runs gratuits Kaggle P100 (buffer 1M RAM) : H_312 puis H_301
+
+Pipeline Kaggle gratuit opérationnel (launcher push/poll/pull, buffer CPU/RAM via `--buffer_device cpu`, ~0.7 ips P100, gratuit). Plus de crédits cloud → tout en gratuit.
+
+### v23 (20k, deter 384) — test H_312 (buffer 1M)
+À iso-iter 20k, buffer 1M vs 500k (v21) : la fin ne dérive plus (18k/19k/20k = 3.6/3.6/3.6 stable vs v21 qui s'effondrait à 2.2). H_312 soutenue. Best 3.70 @14k. crafter_score 1.97%. **Couche 3 jamais touchée** (pickaxe/sword/stone = 0%).
+
+### v24 (20k, deter 1280) — 🎯 test H_301 (archi rééquilibrée) : OUVRE LA COUCHE 3
+Même budget (~14.4M) réalloué : deter 384→1280, hidden 768→256, z 32×16, cnn 16, embed 512 (ratio deter:hidden 0.5:1 → 5:1, RSSM 49% des params).
+
+**Résultat clé (success rates TRAINING, invisible en EVAL argmax)** :
+- **make_wood_pickaxe 0.8% (~28×), make_wood_sword 0.7%, collect_stone 0.1%** — la COUCHE 3, que v23 ne touchait JAMAIS (0%).
+- place_table 3.0% → 5.7%.
+- best EVAL argmax 3.70 = identique v23 (les rares succès couche 3 ne sortent pas en argmax déterministe).
+- crafter_score pic 2.23% (vs 1.97% v23) puis déclin à 2.11% (oscillation H_311 persiste).
+
+**Verdict** : l'archi rééquilibrée VALIDE H_301 — le deter plus gros (mémoire) débloque les chaînes longues (wood→table→pickaxe). PREUVE qu'un 14.4M PEUT atteindre la couche 3 (pas une limite de capacité). MAIS le taux est faible (0.8%), non consolidé → il faut H_308 (train_ratio 512) pour le stabiliser.
+
+**Leçon méthodo** : toujours lire les success rates TRAINING, pas que l'EVAL argmax — j'avais conclu à tort "pas de couche 3" en ne regardant que l'argmax. Les événements rares de couche 3 ne vivent que dans le détail training.
+
+### Suite → v25 : train_ratio 512 (wm_train_per_iter 16) sur TPU single-core
+On a ~28 succès couche 3 dans le buffer, rejoués 128× (vs paper 512×). Le train_ratio 512 = 4× plus d'apprentissage de ces rares succès → hypothèse : les consolide (0.8% → quelques %, puis collect_stone, etc.). TPU car train_ratio 512 = compute dominant (P100 = 32h ingérable ; TPU absorbe).
+
+---
+
 ## v21 — LE RUN BENCHMARK 1M : best 4.40 @ 13k, puis DÉRIVE TARDIVE (nouveau problème)
 
 **Statut : TERMINÉ** (158.7 min, ~$4.7, 30 000 iter ≈ 965k env_steps ≈ benchmark 1M). Config : γ=0.997 + fast critic + entropy 3e-4 + buffer per-env + free bits + ratio 128.

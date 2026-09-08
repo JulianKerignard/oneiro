@@ -41,3 +41,14 @@ videos/*_hd.gif
 # OS
 .DS_Store
 Thumbs.db
+
+# Kaggle run outputs — 7.4 GB sur disque, dont l'essentiel est régénérable.
+# On versionne uniquement les DONNÉES d'un run (~5 MB au total) :
+#   - le log stdout brut
+#   - le summary JSON, qui est la source des figures (experiments/plot_runs.py)
+# Les checkpoints .npz et la copie du repo clonée par le kernel restent ignorés.
+kaggle_outputs/**
+!kaggle_outputs/*/
+!kaggle_outputs/*/*.log
+!kaggle_outputs/*/runs/
+!kaggle_outputs/*/runs/*.json

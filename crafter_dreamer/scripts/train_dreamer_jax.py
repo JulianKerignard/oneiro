@@ -1,8 +1,8 @@
 """
 Training complet du mini-Dreamer pour Crafter — version JAX / Flax NNX.
 
-Port de scripts/train_dreamer.py (PyTorch) vers JAX. Vise un speedup 10-30×
-sur Modal L4 GPU grâce à :
+Port de scripts/train_dreamer.py (PyTorch) vers JAX. Entraînement sur TPU v5e-8
+(Kaggle) via crafter_dreamer/scripts/kaggle_train.py. Le gain vient de :
   - jit-compilation des train_steps (forward + backward + optimizer update fusionnés)
   - jax.lax.scan pour les séquences RSSM et l'imagination (pas de boucle Python)
   - dispatch GPU XLA optimisé
@@ -36,6 +36,7 @@ import argparse
 import math
 import json
 import os
+from functools import partial
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -44,12 +45,12 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import jax.random as jr
+from jax.sharding import NamedSharding, PartitionSpec as P, AxisType
 from flax import nnx
 import optax
-import distrax
 
-from crafter_dreamer.env import CrafterEnv, ACHIEVEMENTS
-from src_jax.buffer import ImageReplayBufferJAX
+from crafter_dreamer.env import CrafterEnv, ACHIEVEMENTS, ACTION_NAMES
+from src_jax.buffer import ImageReplayBufferJAX, ImageReplayBufferCPU
 from src_jax.model import (
     CNNEncoder, CNNDecoder, RSSM, RewardHead, ContinueHead,
     Actor, Critic, RNDModule,
@@ -64,7 +65,8 @@ SEED = 42
 # 1M = paper. Couvre un run 30k iter ENTIER sans wrap FIFO (v21/H_312 : à
 # 500k le buffer était plein à iter 15.6k → écrasement de la diversité early
 # → perte de la capacité de récupération → dérive descendante après ~19k).
-# VRAM : ~12.3GB uint8 — large sur RTXP 96GB ; serré mais possible sur L4 24GB.
+# ~12.3 GB en uint8 : tient en RAM host (--buffer_device cpu, le défaut en prod TPU)
+# mais pas en VRAM sur un accélérateur modeste.
 BUFFER_CAPACITY = 1_000_000
 WARMUP_STEPS = 5_000
 
@@ -85,9 +87,15 @@ SEQ_LEN = 64                 # paper utilise seq_len=64
 IMAGINATION_HORIZON = 16
 
 # Optimization (DreamerV3 canonique)
-LR_WM = 1e-4   # aligné officiel paper (4e-5 mais on garde un peu plus pour converger plus vite)
-LR_AC = 1e-4
-GRAD_CLIP = 1.0   # clipping strict (officiel utilise AGC, on garde global_norm mais beaucoup plus serré)
+LR_WM = 1e-4   # aligné symoon11 (réf 17.65) : WM rapide
+LR_AC = 1e-4   # RETENU sur preuve statistique (audit adversarial 2026-07-22) : sur 15 runs,
+               # lr 1e-4 → 1.94% moyen (n=9, best 2.46% = record absolu) vs lr 3e-5 → 1.61%
+               # moyen (n=6, best 1.89%). A/B propre : v26 (1e-4) 2.46% → v29 (3e-5) 1.89%.
+               # Le passage à 3e-5 "façon symoon11" a été tenté puis ANNULÉ : leur LR va avec
+               # un WM 3.35× plus gros (181M vs 54M), il ne se transpose pas isolément.
+GRAD_CLIP_WM = 1000.0  # aligné symoon11 : clip quasi inactif (1.0 écrasait les gradients recon sommés sur 64x64x3 px)
+GRAD_CLIP_AC = 100.0   # aligné symoon11
+GRAD_CLIP = GRAD_CLIP_AC  # défaut générique (optim RND si activé)
 
 # RL params
 # GAMMA 0.997 (paper) : horizon de valeur ~330 steps (vs ~100 à 0.99).
@@ -135,12 +143,26 @@ RETURN_PERCENTILE_HIGH = 0.95
 # Critic EMA target network
 CRITIC_TARGET_TAU = 0.98
 
-# Architecture (Palier 2)
-EMBED_DIM = 192
-H_DIM = 384
-Z_CATEGORIES = 24
-Z_CLASSES = 24
-HIDDEN_DIM = 768
+# Architecture — Étape 1 : scaling 14.4M → ~75M avec bonne répartition.
+# AVANT (14.4M, AC famélique à 8%) : EMBED 512, H_DIM 1280, Z 32×16, HIDDEN 256, cnn 16,
+# actor/critic = 2 couches × 256.
+# Archi ~75M (deter 2048, stochastique 32×32, CNN_DEPTH 32, MLP 1024) + actor/critic
+# profond (5×1280). On teste le FIX REWARD directement sur le 75M (cible) : les effets
+# ne se transfèrent pas entre tailles (co-tuning taille-dépendant). Le H_collapse du
+# gros actor est traité par LR_AC=3e-5 (valeur symoon11 pour gros actor).
+EMBED_DIM = 1024         # sortie CNN
+H_DIM = 2048             # deter GRU (taille officielle DreamerV3)
+Z_CATEGORIES = 32        # 32 variables catégorielles
+Z_CLASSES = 32           # × 32 classes → stochastique 32×32
+HIDDEN_DIM = 1024        # MLP units RSSM + reward/continue heads
+CNN_DEPTH = 32           # base channels CNN
+# Actor-Critic : MLP 3×1024 (config danijar Crafter) = celle de nos 2 meilleurs runs 65M
+# (v42 1.98%, v47 2.22%). Le passage à 5×1024 "façon symoon11" a été tenté puis ANNULÉ :
+# le seul point de données sur l'élargissement de l'actor est NÉGATIF (v26 actor 2×256 →
+# 2.46% record vs v41 actor 3×1024 → 1.61%), et H est piloté par la taille de l'actor
+# (v25 actor 2×256 → H=1.01 vs v46 actor 3×1024 → H=0.40, à ratio identique).
+AC_HIDDEN_DIM = 1024     # largeur MLP actor/critic (danijar)
+AC_NUM_LAYERS = 3        # profondeur (danijar : 3 couches)
 
 # KL loss DreamerV3
 FREE_BITS = 1.0
@@ -152,11 +174,19 @@ W_RECON = 1.0
 W_KL = 1.0
 W_REWARD = 1.0
 W_CONTINUE = 1.0
+# Poids de la CE reward head sur les ACHIEVEMENTS (|r| > 0.5) UNIQUEMENT — cf. heads.py.
+# Contre le déséquilibre de classes (les +1 = ~1.4% des transitions) qui fait sous-prédire
+# les achievements rares (mesuré v37 : pred~0.05-0.31 sur les +1). Calibrage (seuil 0.5) :
+# w=10 → ~12% de la loss sur les achievements. HISTORIQUE v38-v43 : le seuil était 0.01 et
+# pondérait AUSSI la santé (±0.1, 2.7× plus fréquente) → leakage rew@0=+0.015 → inflation
+# critic +5 (γ=0.997) → scale 2.7→7.7 → PG écrasé ÷2.5. Fix v44 : seuil 0.5 (heads.py),
+# la santé revient à poids 1. Critères de succès : rew@0 ≤ +0.005, scale ≤ 5.
+REWARD_RARE_WEIGHT = 10.0
 
 # Logging / eval
 LOG_INTERVAL = 50
 EVAL_INTERVAL = 2000
-EVAL_EPISODES = 10
+EVAL_EPISODES = 75   # 10 était trop bruité pour trancher un fix (écart-type ~0.5 ach sur 10 eps)
 
 
 # ============================== Phase 13 : Safeguards auto-régulateurs
@@ -397,9 +427,27 @@ def imagine_trajectory(
         new_state, _ = rssm.imagine_step(state, action_oh, subkey_r)
         new_state_vec = jnp.concatenate([new_state["h"], new_state["z"]], axis=-1)
 
-        # Predict reward + continue sur le NEW state (cohérent avec PyTorch)
+        # REVERT de 058beff (vérifié verbatim sur danijar/dreamerv3@main, cf.
+        # docs/HYPERPARAMS_COMPARISON.md) : la reward est prédite sur l'état d'ARRIVÉE
+        # new_state_vec, celui que l'action vient de produire.
+        #
+        # danijar, rssm.py::imagine : `deter = self._core(carry['deter'], carry['stoch'],
+        # actemb)` PUIS `feat = dict(deter=deter, ...)` → feat[t] est l'état APRÈS
+        # action[t], et c'est sur feat que la reward head est appelée. La récompense
+        # immédiate de l'advantage dépend donc de l'action créditée.
+        #
+        # 058beff avait déplacé ce calcul sur state_vec pour « cohérence » avec la
+        # convention d'entraînement — mais c'est cette convention qui était fautive.
+        # Les deux moitiés bougent ensemble : cible décalée (ci-dessus, dans
+        # train_step_wm) + prédiction sur l'arrivée (ici). Avec les deux,
+        # rewards[t] = r(s_t, a_t) et adv[t] = r(s_t,a_t) + γV(s_{t+1}) − V(s_t)
+        # redevient le Bellman standard ; la λ-return d'Oneiro n'a besoin d'aucun
+        # slicing (sa récurrence est déjà non décalée, là où danijar décale en interne
+        # via `interm = rew[:, 1:]`).
         reward_pred = reward_head.predict(new_state_vec)
-        continue_logit = continue_head(new_state_vec)
+        # continue reste sur l'état de DÉPART : c_t = « continue après le step t »,
+        # aligné sur la récurrence R_t = r_t + γ·c_t·(...). Cf. train_step_wm.
+        continue_logit = continue_head(state_vec)
         continue_pred = jax.nn.sigmoid(continue_logit)
 
         out = {
@@ -496,10 +544,53 @@ def train_step_wm(
             free_bits=FREE_BITS, beta_dyn=BETA_DYN, beta_rep=BETA_REP,
         )
 
-        # Reward (twohot symlog cross-entropy)
-        loss_reward = reward_head.loss(state_vec, rewards)
+        # Reward — convention ENTRANTE (alignée danijar, cf. H_316/H_317).
+        #
+        # L'index t porte la récompense reçue en ARRIVANT sur obs_t, soit rewards[t-1].
+        # POURQUOI : `state_vec[t]` est construit depuis obs_t et a_{t-1} (prev_action
+        # décalé, rssm.py:349-352) — il ne contient JAMAIS a_t. Sous la convention
+        # sortante (cible = r(obs_t, a_t)) la cible n'était donc pas une fonction de
+        # l'entrée : l'optimum de Bayes était Σ_a π(a|s)·r(s,a), la *propension de la
+        # politique courante*, quantité non stationnaire. Mesuré : la politique classait
+        # `do` 17e/17 sur les états où `do` rapporte du bois (contrôle : 3e/17).
+        # Avec la cible décalée, r(obs_{t-1}, a_{t-1}) est déterminée par (obs_t, a_{t-1}),
+        # tous deux dans l'état → cible identifiable.
+        #
+        # Le masque annule la frontière d'épisode : si dones[t-1]=1, obs_t est une obs de
+        # reset (l'env auto-reset à la collecte) et aucune récompense ne lui est imputable.
+        # observe_sequence remet déjà h/z/prev_action à zéro au même endroit.
+        def _shift_right(x):
+            return jnp.concatenate([jnp.zeros_like(x[:, :1]), x[:, :-1]], axis=1)
 
-        # Continue (BCE)
+        _not_episode_start = 1.0 - _shift_right(dones).astype(jnp.float32)
+        rewards_in = _shift_right(rewards) * _not_episode_start
+
+        loss_reward = reward_head.loss(state_vec, rewards_in, rare_weight=REWARD_RARE_WEIGHT)
+        # Diagnostic (hors gradient) de la reward head, en 2 populations séparées.
+        # Le seuil 0.01 mélangeait santé (±0.1, fréquente) et achievements (+1, rares) :
+        # la moyenne noyait le signal. On isole donc les achievements à |r| > 0.5.
+        #   rew_pred_ach : prédiction sur les ACHIEVEMENTS (true=+1). Sans fix ~0.05-0.3 ;
+        #                  cible avec fix ~0.7-1.0. C'est LE critère (indépendant du bruit d'éval).
+        #   rew_pred_zero: prédiction sur les états à reward NUL. Doit rester ~0.
+        #                  S'il monte → la head hallucine du reward (rare_weight trop fort).
+        # /!\ Les masques portent sur rewards_in (la cible réelle) : sur `rewards` ils
+        # décriraient une autre population que celle qu'on entraîne → rew@ach mentirait.
+        # NOTE : ce diagnostic reste IN-SAMPLE (calculé sur le batch qu'on fitte). Mesuré
+        # hors échantillon, rare_weight=10 et =1 donnent la même valeur (0.40) — ne pas
+        # lire rew@ach comme une capacité de généralisation.
+        _rew_pred = reward_head.predict(state_vec)
+        _ach = (jnp.abs(rewards_in) > 0.5).astype(jnp.float32)
+        _zero = (jnp.abs(rewards_in) <= 0.01).astype(jnp.float32)
+        rew_pred_ach = (_rew_pred * _ach).sum() / jnp.maximum(_ach.sum(), 1.0)
+        rew_true_ach = (rewards_in * _ach).sum() / jnp.maximum(_ach.sum(), 1.0)
+        rew_pred_zero = (_rew_pred * _zero).sum() / jnp.maximum(_zero.sum(), 1.0)
+        rew_n_ach = _ach.sum()
+
+        # Continue (BCE) — cible NON décalée, volontairement.
+        # continue_head(s_t) ≈ 1-dones[t] signifie « l'épisode continue après le step t »,
+        # ce qui est exactement le c_t de la récurrence λ-return
+        # (R_t = r_t + γ·c_t·(...)). Décaler cette cible désalignerait c_t d'un cran et
+        # casserait discount_cum. Seule la reward change de convention.
         continue_target = 1.0 - dones.astype(jnp.float32)
         loss_continue = continue_head.loss(state_vec, continue_target)
 
@@ -513,6 +604,10 @@ def train_step_wm(
             "loss_kl": loss_kl,
             "loss_reward": loss_reward,
             "loss_continue": loss_continue,
+            "rew_pred_ach": rew_pred_ach,
+            "rew_true_ach": rew_true_ach,
+            "rew_pred_zero": rew_pred_zero,
+            "rew_n_ach": rew_n_ach,
         }
         return loss_wm, aux
 
@@ -542,9 +637,17 @@ def train_step_ac(
     key: jax.Array,
     entropy_coef: float,
     effective_alpha: jax.Array = None,
+    actor_coef: jax.Array = None,
 ) -> tuple:
     """
     Un train step Actor + Critic via imagination dans le WM.
+
+    actor_coef : scalaire jnp (défaut 1.0). Multiplie la loss actor (PG+entropy).
+      0.0 = AC WARMUP : le CRITIC apprend les values (et l'EMA du scale chauffe)
+      pendant que l'actor reste gelé (gradients nuls). Évite le double piège du
+      démarrage : (a) l'actor se verrouille sur les returns bruités d'un WM nul
+      (rich-get-richer, H 2.5→0.1 en <200 iters sur les actors >=1024) ; (b) au
+      dégel, un critic à zéro rendrait tous les advantages positifs → re-collapse.
 
     Étapes :
       1. Encode batch + RSSM observe → initial states (stop_gradient, WM gelé).
@@ -657,7 +760,9 @@ def train_step_ac(
         )
         loss_critic = loss_critic_main + 1.0 * loss_critic_slowreg
 
-        loss_ac = loss_actor + loss_critic
+        # actor_coef=0.0 (warmup) : seul le critic reçoit du gradient.
+        ac_coef = 1.0 if actor_coef is None else actor_coef
+        loss_ac = ac_coef * loss_actor + loss_critic
 
         mean_H = jnp.mean(traj["entropies"])
         # Percentiles du batch courant (pour update EMA hors gradient)
@@ -678,6 +783,14 @@ def train_step_ac(
             "return_p5_batch": p5_batch,
             "return_p95_batch": p95_batch,
             "return_scale": scale,
+            # Reward PRÉDIT dans l'imagination : c'est le SEUL signal que voit l'actor
+            # (il ne voit jamais les vraies récompenses). Si img_rew_max reste ~0, aucune
+            # trajectoire rêvée ne contient de récompense de taille achievement (+1) →
+            # l'actor ne peut pas apprendre le craft, quel que soit rare_weight.
+            "img_rew_mean": jnp.mean(rewards_pred),
+            "img_rew_max": jnp.max(rewards_pred),
+            "img_rew_p99": jnp.quantile(rewards_pred.reshape(-1), 0.99),
+            "img_rew_frac_hi": jnp.mean((rewards_pred > 0.5).astype(jnp.float32)),
         }
         return loss_ac, aux
 
@@ -743,6 +856,7 @@ def make_functional_train_steps(
     opt_alpha: nnx.Optimizer = None,
     rnd_module: "RNDModule" = None,
     opt_rnd: nnx.Optimizer = None,
+    repl_sharding=None,
 ):
     """
     Factory : crée les versions fonctionnelles jit-compilées des train steps.
@@ -789,7 +903,24 @@ def make_functional_train_steps(
     if rnd_module is not None and opt_rnd is not None:
         rnd_graphdef, rnd_state = nnx.split((rnd_module, opt_rnd), ...)
 
-    @jax.jit
+    # ----------- Data-parallel : out_shardings pour pinner les sorties.
+    # Le state (params + Adam m/v) reste RÉPLIQUÉ en entrée ET en sortie. Avec
+    # mesh actif + entrées bien shardées, jit propage souvent seul ; annoter
+    # out_shardings (state répliqué) évite des re-placements surprises entre
+    # itérations. Les batchs (entrée) sont shardés côté buffer (device_put).
+    # repl_sharding=None → out_shardings=None = comportement par défaut
+    # (non-régression : aucun changement quand le data-parallel est inactif).
+    repl = repl_sharding  # alias court (None si DP off)
+
+    # train_wm_fn : (new_wm_state[repl], metrics[repl])
+    out_sh_wm = None if repl is None else (repl, repl)
+    # train_ac_fn* : (new_ac_state[repl], new_slow_state[repl],
+    #                 new_ema_std[repl], metrics[repl])
+    out_sh_ac = None if repl is None else (repl, repl, repl, repl)
+    # act_fn_functional : (new_state[repl: h/z petits, répliqués], actions[repl])
+    out_sh_act = None if repl is None else (repl, repl)
+
+    @partial(jax.jit, out_shardings=out_sh_wm)
     def train_wm_fn(wm_state, batch, key):
         # Reconstruct modules + optimizer dans le scope du jit (pure)
         wm_bundle_local, opt_wm_local = nnx.merge(wm_graphdef, wm_state)
@@ -810,10 +941,10 @@ def make_functional_train_steps(
     # entropy_coef est un float Python : JAX cache le trace par valeur tant
     # qu'elle ne change pas (pas de re-trace dans la hot loop si --entropy_coef
     # est constant pour tout le run).
-    @jax.jit
+    @partial(jax.jit, out_shardings=out_sh_ac)
     def train_ac_fn_inner(
         wm_state, ac_state, slow_state,
-        batch, return_ema_std, key, entropy_coef,
+        batch, return_ema_std, key, entropy_coef, actor_coef=None,
     ):
         # Reconstruct AC + slow_critic + WM (read-only pour AC) dans le scope du jit
         ac_bundle_local, opt_ac_local = nnx.merge(ac_graphdef, ac_state)
@@ -826,6 +957,7 @@ def make_functional_train_steps(
             encoder_l, rssm_l, reward_l, continue_l,
             actor_l, critic_l, slow_local,
             opt_ac_local, batch, return_ema_std, key, entropy_coef,
+            actor_coef=actor_coef,
         )
 
         # Re-split AC et slow_critic
@@ -840,10 +972,10 @@ def make_functional_train_steps(
 
     # ---- Variante adaptive : prend effective_alpha (alpha appris * auto_explore_mult)
     # en jax.Array. On la trace via le même graphdef que train_ac_fn_inner.
-    @jax.jit
+    @partial(jax.jit, out_shardings=out_sh_ac)
     def train_ac_fn_adaptive(
         wm_state, ac_state, slow_state,
-        batch, return_ema_std, key, effective_alpha,
+        batch, return_ema_std, key, effective_alpha, actor_coef=None,
     ):
         ac_bundle_local, opt_ac_local = nnx.merge(ac_graphdef, ac_state)
         actor_l, critic_l = ac_bundle_local
@@ -857,6 +989,7 @@ def make_functional_train_steps(
             opt_ac_local, batch, return_ema_std, key,
             entropy_coef=0.0,  # ignoré quand effective_alpha est fourni
             effective_alpha=effective_alpha,
+            actor_coef=actor_coef,
         )
 
         new_ac_state = nnx.split((ac_bundle_local, opt_ac_local), ...)[1]
@@ -928,11 +1061,26 @@ def make_functional_train_steps(
 
     # Version functional de act_fn : prend les states au lieu des modules.
     # Permet d'utiliser les params à jour SANS muter les modules originaux.
-    @jax.jit
+    # Data-parallel : la COLLECTE n'est PAS shardée (env CPU séquentiel, batch =
+    # n_envs souvent non divisible par device_count). On garde state + I/O
+    # RÉPLIQUÉS (out_shardings=repl) : cohérent avec les states répliqués, pas
+    # de split du petit batch n_envs.
+    @partial(jax.jit, out_shardings=out_sh_act)
     def act_fn_functional(
         wm_state, ac_state,
-        prev_state, prev_actions_oh, obs_batch, key,
+        prev_state, prev_actions_oh, obs_batch, key, unimix=0.01,
     ):
+        """unimix : plancher d'exploration de la COLLECTE (jnp scalaire → pas de re-trace).
+
+        L'actor de DreamerV3 s'entraîne uniquement dans l'IMAGINATION, donc relever
+        l'unimix ici ne touche AUCUN gradient — c'est purement la politique de
+        comportement. Mesuré sur v50 : avec unimix=0.01 et une politique à 1.3 action
+        effective /17, `place_table` n'est tentée que 0.10% des steps (57× moins qu'un
+        agent random qui, lui, réussit 8% du temps) alors que l'agent A le bois requis
+        dans 6.7% des épisodes → zéro table sur 6236 épisodes → aucun gradient ne peut
+        jamais amorcer la chaîne de craft. Le schedule décroissant amorce tôt, puis
+        rend la main à la politique apprise (retour au canonique 0.01).
+        """
         wm_bundle_local, _opt_unused = nnx.merge(wm_graphdef, wm_state)
         ac_bundle_local, _opt_unused2 = nnx.merge(ac_graphdef, ac_state)
         encoder_l, rssm_l, _dec, _r, _c = wm_bundle_local
@@ -942,7 +1090,7 @@ def make_functional_train_steps(
         emb = encoder_l(obs_batch)
         new_state, _, _ = rssm_l.observe_step(prev_state, prev_actions_oh, emb, k_obs)
         state_vec = jnp.concatenate([new_state["h"], new_state["z"]], axis=-1)
-        dist = actor_l.get_dist(state_vec, mask=None)
+        dist = actor_l.get_dist(state_vec, mask=None, unimix=unimix)
         actions_int = dist.sample(seed=k_act)
         return new_state, actions_int
 
@@ -1274,13 +1422,74 @@ def parse_args():
     p.add_argument("--batch_size", type=int, default=BATCH_SIZE)
     p.add_argument("--wm_train_per_iter", type=int, default=WM_TRAIN_PER_ITER)
     p.add_argument("--ac_train_per_iter", type=int, default=AC_TRAIN_PER_ITER)
+    p.add_argument("--unimix_init", type=float, default=0.01,
+                   help="Plancher d'exploration de la COLLECTE au début du run (défaut 0.01 "
+                        "= canonique DreamerV3). Relever (0.2-0.3) amorce les actions de craft "
+                        "jamais tentées : mesuré sur v50, place_table est tentée 0.10%% des "
+                        "steps (57x moins qu'un random qui réussit 8%%) alors que le bois requis "
+                        "est là dans 6.7%% des épisodes → 0 table sur 6236 ép. → rien à apprendre. "
+                        "N'affecte AUCUN gradient (l'actor s'entraîne dans l'imagination).")
+    p.add_argument("--unimix_final", type=float, default=0.01,
+                   help="Plancher d'exploration en fin de schedule (retour au canonique).")
+    p.add_argument("--unimix_decay_iters", type=int, default=0,
+                   help="Durée de la décroissance linéaire unimix_init → unimix_final. 0 = off.")
+    p.add_argument("--ac_warmup_iters", type=int, default=0,
+                   help="Gèle l'actor-critic pendant N itérations (le WM apprend seul, "
+                        "collecte via l'actor uniforme). Protège du verrouillage de politique "
+                        "au démarrage (H 2.5→0.1 en <200 iters sur les actors >=1024 quand "
+                        "l'AC apprend sur un WM encore nul). 0 = off (comportement historique).")
+    p.add_argument("--rare_weight", type=float, default=None,
+                   help="Override de REWARD_RARE_WEIGHT (poids CE des achievements). "
+                        "None = constante du fichier.")
+    p.add_argument("--replay_priority_frac", type=float, default=0.0,
+                   help="Fraction du batch AC forcée à contenir un achievement (reward>0.5). "
+                        "Prioritized replay reward, AC SEULEMENT (le WM garde une distribution "
+                        "non-biaisée). 0.0 = off. Ne cible pas un achievement précis (buffer ne "
+                        "stocke que reward=+1) → tous achievements confondus.")
+    # ---- Architecture (défauts = constantes du fichier). Exposée en CLI pour pouvoir
+    # tester la capacité sans commit. NOTE : le ranking des tailles mesuré avant le fix
+    # de convention (H_316) est caduc — le 65M perdait contre le 14M parce qu'il
+    # exploitait mieux l'optimum local créé par le crédit inversé, pas parce que la
+    # capacité nuisait. Repères : symoon11 WM=181.6M → 17.65% ; danijar XL deter 8192.
+    p.add_argument("--embed_dim", type=int, default=EMBED_DIM,
+                   help=f"Sortie du CNN encoder (défaut {EMBED_DIM}).")
+    p.add_argument("--h_dim", type=int, default=H_DIM,
+                   help=f"Taille du deter GRU (défaut {H_DIM} ; danijar 4096-8192).")
+    p.add_argument("--z_categories", type=int, default=Z_CATEGORIES,
+                   help=f"Nombre de variables catégorielles z (défaut {Z_CATEGORIES}).")
+    p.add_argument("--z_classes", type=int, default=Z_CLASSES,
+                   help=f"Classes par variable z (défaut {Z_CLASSES}).")
+    p.add_argument("--hidden_dim", type=int, default=HIDDEN_DIM,
+                   help=f"Largeur MLP du RSSM + reward/continue heads (défaut {HIDDEN_DIM}).")
+    p.add_argument("--cnn_depth", type=int, default=CNN_DEPTH,
+                   help=f"Canaux de base du CNN encoder/decoder (défaut {CNN_DEPTH} ; "
+                        "c'est le levier du decoder, où symoon11 est 5.2x plus gros).")
+    p.add_argument("--ac_hidden_dim", type=int, default=AC_HIDDEN_DIM,
+                   help=f"Largeur MLP actor/critic (défaut {AC_HIDDEN_DIM}).")
+    p.add_argument("--ac_num_layers", type=int, default=AC_NUM_LAYERS,
+                   help=f"Profondeur MLP actor/critic (défaut {AC_NUM_LAYERS}).")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--warmup_steps", type=int, default=WARMUP_STEPS)
+    p.add_argument("--resume_warmup_steps", type=int, default=50_000,
+                   help="Transitions collectées pour re-remplir le buffer à la reprise "
+                        "(--resume_from), avec la politique CHARGÉE et non au hasard. Le "
+                        "buffer n'étant pas sauvé (12.3 GB à 1M), c'est ce qui évite de "
+                        "réentraîner un agent compétent sur une poignée de données "
+                        "aléatoires. 50k ≈ quelques minutes de collecte.")
     p.add_argument("--profile", action="store_true",
                    help="Active le profiling fin (breakdown collect/WM/AC/transfer).")
     p.add_argument("--buffer_capacity", type=int, default=BUFFER_CAPACITY,
                    help=f"Taille du replay buffer (défaut {BUFFER_CAPACITY} = paper ; "
-                        "~12.3GB VRAM à 1M. Réduire pour smoketests locaux).")
+                        "~12.3GB à 1M. Réduire pour smoketests locaux).")
+    p.add_argument("--buffer_device", choices=["gpu", "cpu"], default="gpu",
+                   help="gpu : buffer en VRAM (rapide, défaut, besoin ~12.3GB VRAM à 1M). "
+                        "cpu : buffer en RAM host, transfert du batch au sample "
+                        "(défaut en production TPU, et seule option si la VRAM ne tient "
+                        "pas les 12.3 GB ; -20 à -40%% ips).")
+    p.add_argument("--resume_meta", type=str, default=None,
+                   help="Chemin d'un .meta.json de remplacement (compteurs + historique) "
+                        "pour reparer une chaine de reprises dont un maillon ne les "
+                        "transportait pas. Par defaut : le .meta.json du checkpoint.")
     p.add_argument("--resume_from", type=str, default=None,
                    help="Checkpoint .npz à charger pour reprendre le training "
                         "(reprend à l'iter du .meta.json). Le buffer repart du "
@@ -1312,6 +1521,9 @@ def parse_args():
                    help="Désactive RND.")
     p.add_argument("--rnd_coef", type=float, default=RND_COEF,
                    help=f"Coef du bonus intrinsèque RND (défaut: {RND_COEF}).")
+    p.add_argument("--rnd_anneal", action="store_true", default=False,
+                   help="Annealing lineaire du rnd_coef vers 0 apres le warmup "
+                        "(exploration tot, exploitation ensuite ; style Burda).")
     # Phase 13 : Safeguards auto-régulateurs
     # SAFEGUARD 1 : RND warmup linéaire (0 → rnd_coef sur N iter)
     p.add_argument("--rnd_warmup_steps", type=int, default=5000,
@@ -1399,6 +1611,12 @@ class Profiler:
 def main():
     args = parse_args()
 
+    # Override runtime de REWARD_RARE_WEIGHT (--rare_weight). Doit se faire AVANT
+    # le premier trace jit de train_step_wm (qui capture la globale au trace).
+    if getattr(args, "rare_weight", None) is not None:
+        globals()["REWARD_RARE_WEIGHT"] = float(args.rare_weight)
+        print(f"[override] REWARD_RARE_WEIGHT = {REWARD_RARE_WEIGHT}")
+
     # Si mp_collect : forcer spawn (compat JAX/CUDA). Doit être fait avant
     # toute création de process. Idempotent : ne fail pas si déjà set.
     if args.mp_collect:
@@ -1419,6 +1637,27 @@ def main():
     train_ratio_eff = (args.batch_size * SEQ_LEN * args.wm_train_per_iter) / collected_per_iter_total
     print(f"JAX backend : {backend}")
     print(f"Device      : {jax.devices()}")
+
+    # ----------- Data-parallel : mesh 1D sur tous les devices
+    # Stratégie : params + état optimiseur RÉPLIQUÉS, batch SHARDÉ sur l'axe
+    # `data` (split de la dim 0 = B). Activation automatique : 1 device → mesh
+    # trivial (non-régression totale), N devices → vrai data-parallel.
+    #
+    # IMPORTANT : axis_types=Auto (mode GSPMD). Le défaut de jax.make_mesh est
+    # Explicit, qui REJETTE le lax.scan du RSSM / de l'imagination (carry input
+    # non-shardé vs output shardé → TypeError). En mode Auto, XLA propage le
+    # sharding data-parallel à travers le scan et agrège les .mean()/.sum() des
+    # losses cross-shard tout seul — aucun lax.pmean à écrire.
+    n_devices = jax.device_count()
+    mesh = jax.make_mesh((n_devices,), ('data',), axis_types=(AxisType.Auto,))
+    data_sharding = NamedSharding(mesh, P('data'))   # batch : dim 0 (B) shardée
+    repl_sharding = NamedSharding(mesh, P())         # state : répliqué
+    if n_devices > 1:
+        print(f"Sharding    : DATA-PARALLEL sur {n_devices} devices "
+              f"(mesh {mesh.shape}, axis 'data', batch dim0 shardé, state répliqué)")
+    else:
+        print(f"Sharding    : 1 device → mesh trivial (data-parallel inactif, non-régression)")
+
     print(f"Run         : {args.run_name}")
     print(f"Config      : entropy={args.entropy_coef}  train_iter={args.train_iter}  "
           f"n_envs={args.n_envs}  batch={args.batch_size}  seq_len={SEQ_LEN}")
@@ -1442,26 +1681,70 @@ def main():
     # Buffer per-env : les séquences RSSM doivent être des trajectoires d'UN
     # seul env (fix bug interleaving : avant, chaque séquence de 64 steps
     # changeait d'env à chaque step → dynamique fictive apprise par le prior).
-    buffer = ImageReplayBufferJAX(
+    BufferClass = ImageReplayBufferJAX if args.buffer_device == "gpu" else ImageReplayBufferCPU
+    buffer = BufferClass(
         capacity=args.buffer_capacity, obs_shape=obs_shape, n_envs=n_envs,
+        data_sharding=data_sharding,
     )
+    print(f"Buffer      : {args.buffer_device.upper()} "
+          f"({args.buffer_capacity:,} cap, {buffer.memory_usage_mb():.0f} MB)")
 
     # ----------- Setup models
+    # Dimensions prises depuis args (défauts = les constantes du fichier) : permet de
+    # varier l'architecture sans commit, donc de garder la discipline « une variable
+    # par run » sur les expériences de capacité.
+    # REPRISE : l'architecture est dictee par le checkpoint, pas par la ligne de
+    # commande. La retaper a la main est une source d'erreur silencieuse — un oubli
+    # construit le modele par defaut, le loader ecrase des tenseurs de shapes
+    # incompatibles et le crash n'arrive qu'au premier forward (constate sur v59 :
+    # 64.9M construit sur un checkpoint 14.4M). On la lit donc dans le .meta.json.
+    ARCH_KEYS = ("embed_dim", "h_dim", "z_categories", "z_classes",
+                 "hidden_dim", "cnn_depth", "ac_hidden_dim", "ac_num_layers")
+    if args.resume_from:
+        _amp = Path(args.resume_meta) if args.resume_meta else \
+               Path(args.resume_from).with_suffix(".meta.json")
+        _ckpt_args = json.loads(_amp.read_text()).get("args", {}) if _amp.exists() else {}
+        _over = {k: _ckpt_args[k] for k in ARCH_KEYS
+                 if k in _ckpt_args and _ckpt_args[k] != getattr(args, k)}
+        if _over:
+            print("[resume] architecture reprise du checkpoint : "
+                  + ", ".join(f"{k} {getattr(args, k)}→{v}" for k, v in _over.items()))
+            for k, v in _over.items():
+                setattr(args, k, v)
+        elif _ckpt_args:
+            print("[resume] architecture identique à celle du checkpoint.")
+
+    embed_dim = args.embed_dim
+    h_dim = args.h_dim
+    hidden_dim = args.hidden_dim
+    cnn_depth = args.cnn_depth
+    ac_hidden = args.ac_hidden_dim
+    ac_layers = args.ac_num_layers
+
     rngs = nnx.Rngs(seed)
-    encoder = CNNEncoder(in_channels=3, embed_dim=EMBED_DIM, base_channels=32, rngs=rngs)
+    encoder = CNNEncoder(in_channels=3, embed_dim=embed_dim, base_channels=cnn_depth, rngs=rngs)
     rssm = RSSM(
-        embed_dim=EMBED_DIM, action_dim=action_dim,
-        h_dim=H_DIM, z_categories=Z_CATEGORIES, z_classes=Z_CLASSES,
-        hidden_dim=HIDDEN_DIM, rngs=rngs,
+        embed_dim=embed_dim, action_dim=action_dim,
+        h_dim=h_dim, z_categories=args.z_categories, z_classes=args.z_classes,
+        hidden_dim=hidden_dim, rngs=rngs,
     )
-    decoder = CNNDecoder(state_dim=rssm.state_dim, out_channels=3, base_channels=32, rngs=rngs)
-    reward_head = RewardHead(state_dim=rssm.state_dim, hidden_dim=HIDDEN_DIM, rngs=rngs)
-    continue_head = ContinueHead(state_dim=rssm.state_dim, hidden_dim=HIDDEN_DIM, rngs=rngs)
-    actor = Actor(state_dim=rssm.state_dim, hidden_dim=HIDDEN_DIM, action_dim=action_dim, rngs=rngs)
-    critic = Critic(state_dim=rssm.state_dim, hidden_dim=HIDDEN_DIM, rngs=rngs)
+    decoder = CNNDecoder(state_dim=rssm.state_dim, out_channels=3, base_channels=cnn_depth, rngs=rngs)
+    reward_head = RewardHead(state_dim=rssm.state_dim, hidden_dim=hidden_dim, rngs=rngs)
+    continue_head = ContinueHead(state_dim=rssm.state_dim, hidden_dim=hidden_dim, rngs=rngs)
+    actor = Actor(
+        state_dim=rssm.state_dim, hidden_dim=ac_hidden, action_dim=action_dim,
+        num_layers=ac_layers, rngs=rngs,
+    )
+    critic = Critic(
+        state_dim=rssm.state_dim, hidden_dim=ac_hidden,
+        num_layers=ac_layers, rngs=rngs,
+    )
 
     # Slow critic : copie initiale du critic
-    slow_critic = Critic(state_dim=rssm.state_dim, hidden_dim=HIDDEN_DIM, rngs=nnx.Rngs(seed + 100))
+    slow_critic = Critic(
+        state_dim=rssm.state_dim, hidden_dim=ac_hidden,
+        num_layers=ac_layers, rngs=nnx.Rngs(seed + 100),
+    )
     nnx.update(slow_critic, nnx.state(critic, nnx.Param))
 
     # ----------- Adaptive alpha + RND (Phase 12)
@@ -1517,18 +1800,18 @@ def main():
     # ----------- Optimizers : on group les modules en tuples pour partager un opt
     # WM bundle : encoder + rssm + decoder + reward_head + continue_head
     wm_bundle = (encoder, rssm, decoder, reward_head, continue_head)
-    tx_wm = optax.chain(
-        optax.clip_by_global_norm(GRAD_CLIP),
+    tx_wm = optax.apply_if_finite(optax.chain(
+        optax.clip_by_global_norm(GRAD_CLIP_WM),
         optax.adam(LR_WM),
-    )
+    ), max_consecutive_errors=10)
     opt_wm = nnx.Optimizer(wm_bundle, tx_wm, wrt=nnx.Param)
 
     # AC bundle : actor + critic
     ac_bundle = (actor, critic)
-    tx_ac = optax.chain(
-        optax.clip_by_global_norm(GRAD_CLIP),
+    tx_ac = optax.apply_if_finite(optax.chain(
+        optax.clip_by_global_norm(GRAD_CLIP_AC),
         optax.adam(LR_AC),
-    )
+    ), max_consecutive_errors=10)
     opt_ac = nnx.Optimizer(ac_bundle, tx_ac, wrt=nnx.Param)
 
     # Return normalization : Percentile-EMA P5/P95 (DreamerV3 canonique)
@@ -1541,8 +1824,20 @@ def main():
     # (les Variables nnx sont partagées : muter les modules ici suffit,
     # le nnx.split de make_functional_train_steps capturera les poids chargés).
     start_iter = 0
+    # Garde : demander une reprise et repartir de zero en silence est le pire des
+    # comportements — c'est ce qui a coute 12h de TPU sur v57, ou le launcher passait
+    # `--resume_from ""` (chaine vide, donc falsy) apres un glob infructueux.
+    # Si le flag est present mais inexploitable, on ARRETE.
+    if args.resume_from is not None:
+        _rp = str(args.resume_from).strip()
+        if not _rp:
+            sys.exit("ERREUR : --resume_from est vide. Une reprise a ete demandee mais "
+                     "aucun checkpoint n'a ete resolu — refus de repartir de zero.")
+        if not Path(_rp).is_file():
+            sys.exit(f"ERREUR : --resume_from introuvable : {_rp}")
+        args.resume_from = _rp
     if args.resume_from:
-        start_iter = load_checkpoint_into_modules(args.resume_from, {
+        start_iter = load_checkpoint_into_modules(args.resume_from, meta_override=args.resume_meta, named_modules={
             "encoder": encoder, "rssm": rssm, "decoder": decoder,
             "reward_head": reward_head, "continue_head": continue_head,
             "actor": actor, "critic": critic, "slow_critic": slow_critic,
@@ -1550,8 +1845,25 @@ def main():
         if start_iter >= args.train_iter:
             print(f"[resume] iter {start_iter} >= train_iter {args.train_iter} : rien à faire.")
             return
-        # Caveat connu : optimizer Adam (m/v), buffer et EMAs repartent à zéro
-        # — resume "soft", suffisant pour survivre à une préemption spot.
+        # Restaure le scale EMA (P5/P95) s'il est présent dans le checkpoint. C'était LE
+        # piège de la reprise : sans lui, scale = max(p95-p5, 1.0) repart à ~1.0 alors
+        # qu'un run mature tourne à 5-8 → advantages gonflés d'autant sur plusieurs
+        # centaines d'itérations (EMA decay 0.99), juste après la reprise.
+        # Etat Adam (mu/nu/count) des deux optimizers.
+        load_optimizer_state(args.resume_from, {"__opt_wm": opt_wm, "__opt_ac": opt_ac})
+
+        _ck = np.load(args.resume_from, allow_pickle=False)
+        if "__return_ema_std" in _ck.files:
+            return_ema_std = jnp.asarray(_ck["__return_ema_std"])
+            _p5, _p95 = float(return_ema_std[0]), float(return_ema_std[1])
+            print(f"[resume] scale EMA restauré : p5={_p5:.2f} p95={_p95:.2f} "
+                  f"→ scale={max(_p95 - _p5, 1.0):.2f}")
+        else:
+            print("[resume] /!\\ pas de __return_ema_std dans ce checkpoint (format ancien) : "
+                  "le scale repart de son init → advantages gonflés au démarrage.")
+        # Caveat restant : la PRNG key repart de zéro (sans effet sur la qualité, seule
+        # la reproductibilité bit-a-bit est perdue). Le buffer, lui, est re-rempli par un
+        # warmup ON-POLICY — cf. Phase 0 plus bas.
 
     # ----------- FIX 1 : Functional training loop
     # Split modules + optimizers en (graphdef, state). Le graphdef est capturé
@@ -1561,12 +1873,28 @@ def main():
         wm_bundle, opt_wm, ac_bundle, opt_ac, slow_critic,
         alpha_module=alpha_module, opt_alpha=opt_alpha,
         rnd_module=rnd_module, opt_rnd=opt_rnd,
+        repl_sharding=repl_sharding,
     )
     wm_state = functional["wm_state"]
     ac_state = functional["ac_state"]
     slow_state = functional["slow_state"]
     alpha_state = functional["alpha_state"]
     rnd_state = functional["rnd_state"]
+
+    # ----------- Data-parallel : RÉPLIQUER les states sur tous les devices.
+    # Params + état optimiseur (Adam m/v) sont répliqués (le 75M tient large sur
+    # un core → pas de FSDP). Pas besoin d'init-sous-jit : un device_put du state
+    # déjà construit suffit. Sur 1 device, c'est un no-op fonctionnel.
+    wm_state = jax.device_put(wm_state, repl_sharding)
+    ac_state = jax.device_put(ac_state, repl_sharding)
+    slow_state = jax.device_put(slow_state, repl_sharding)
+    if alpha_state is not None:
+        alpha_state = jax.device_put(alpha_state, repl_sharding)
+    if rnd_state is not None:
+        rnd_state = jax.device_put(rnd_state, repl_sharding)
+    # return_ema_std (array (2,)) : scalaire d'état → répliqué.
+    return_ema_std = jax.device_put(return_ema_std, repl_sharding)
+
     train_wm_fn = functional["train_wm_fn"]
     train_ac_fn = functional["train_ac_fn"]
     train_ac_fn_adaptive = functional["train_ac_fn_adaptive"]
@@ -1590,19 +1918,83 @@ def main():
     # ----------- Setup act_fn (jit compilé)
     act_fn = make_act_fn()
 
-    # ----------- Phase 0 : Warmup random
+    # ----------- Data-parallel : active le mesh pour toute la suite (warmup +
+    # hot loop). Sur 1 device, mesh trivial → aucun effet. La correctness du DP
+    # repose surtout sur les shardings d'entrée (portés par les arrays
+    # device_put) + out_shardings des jit ; ce set_mesh global permet en plus
+    # aux specs P() brutes de résoudre et fixe le contexte d'exécution.
+    jax.set_mesh(mesh)
+
+    # ----------- Phase 0 : Warmup — remplissage initial du buffer
+    #
+    # Le buffer n'est PAS sauvegardé dans les checkpoints (1M transitions uint8 =
+    # 12.3 GB). A la reprise il repart donc vide, et c'était la principale source de
+    # perte de qualité : l'ancienne version le remplissait avec 5000 transitions de
+    # politique ALEATOIRE, puis relançait l'entraînement dessus à replay ratio 128-256.
+    # Un agent à 10 achievements/épisode voyait ainsi son world model réentraîné sur des
+    # données de marche au hasard, et chaque transition rejouée des dizaines de fois.
+    #
+    # A la reprise on remplit donc avec la politique CHARGEE, et sur bien plus de pas
+    # (--resume_warmup_steps) : la distribution du buffer redevient celle que l'agent
+    # produit réellement, et le sur-apprentissage sur un échantillon minuscule disparaît.
+    resuming = bool(args.resume_from)
+    n_warmup = args.resume_warmup_steps if resuming else args.warmup_steps
+    mode = "ON-POLICY (reprise)" if resuming else "random"
     print("=" * 60)
-    print(f"Phase 0 : Warmup random ({args.warmup_steps} steps, {n_envs} envs)")
+    print(f"Phase 0 : Warmup {mode} ({n_warmup} steps, {n_envs} envs)")
     print("=" * 60)
     t_start = time.time()
-    steps_per_env = args.warmup_steps // n_envs
-    for _ in range(steps_per_env):
-        for i, env in enumerate(envs):
-            action = np.random.randint(0, action_dim)
-            next_obs, r, done, _ = env.step(action)
-            buffer.add(obs_list[i], action, r, next_obs, done, env_id=i)
-            obs_list[i] = next_obs if not done else env.reset()
+    steps_per_env = max(1, n_warmup // n_envs)
+
+    if resuming:
+        # Même boucle que la collecte de la phase 1 : état RSSM porté d'un step à
+        # l'autre, remis à zéro sur `done`, actions tirées de la politique chargée.
+        warm_state = jax.device_put(rssm.init_state(n_envs), repl_sharding)
+        warm_prev_a = jax.device_put(
+            jnp.zeros((n_envs, action_dim), dtype=jnp.float32), repl_sharding)
+        # Clé dédiée dérivée du seed : `main_key` n'est créée qu'après cette phase,
+        # et on ne veut pas consommer son flux (la collecte de la phase 1 doit rester
+        # reproductible indépendamment de la longueur du warmup).
+        warm_key = jr.PRNGKey(seed + 777)
+        for _ in range(steps_per_env):
+            obs_batch = jax.device_put(np.stack(obs_list), repl_sharding)
+            warm_key, subk = jr.split(warm_key)
+            warm_state, actions_int = act_fn_func(
+                wm_state, ac_state, warm_state, warm_prev_a, obs_batch, subk, 0.01)
+            actions_np = np.asarray(actions_int)
+            h_arr, z_arr = np.array(warm_state["h"]), np.array(warm_state["z"])
+            next_prev_a = np.zeros((n_envs, action_dim), dtype=np.float32)
+            for i, env in enumerate(envs):
+                a = int(actions_np[i])
+                next_obs, r, done, _ = env.step(a)
+                buffer.add(obs_list[i], a, r, next_obs, done, env_id=i)
+                if done:
+                    h_arr[i] = 0.0        # reset de l'état latent sur fin d'épisode
+                    z_arr[i] = 0.0
+                    obs_list[i] = env.reset()
+                else:
+                    next_prev_a[i, a] = 1.0
+                    obs_list[i] = next_obs
+            warm_state = {"h": jax.device_put(h_arr, repl_sharding),
+                          "z": jax.device_put(z_arr, repl_sharding)}
+            warm_prev_a = jax.device_put(next_prev_a, repl_sharding)
+    else:
+        for _ in range(steps_per_env):
+            for i, env in enumerate(envs):
+                action = np.random.randint(0, action_dim)
+                next_obs, r, done, _ = env.step(action)
+                buffer.add(obs_list[i], action, r, next_obs, done, env_id=i)
+                obs_list[i] = next_obs if not done else env.reset()
+    # Densité de récompense du buffer initial : c'est LE diagnostic de la reprise.
+    # Un warmup aléatoire produit ~0.012 reward/step (≈2.3 achievements/épisode) ; un
+    # agent competent ~0.035-0.045. Si ce chiffre s'effondre après une reprise, le
+    # world model va être réentraîné sur des données non représentatives.
+    _wr = np.asarray(buffer.rewards)
+    _n = min(len(buffer), _wr.size)
+    _rate = float(np.abs(_wr).sum() / max(_n, 1))
+    _ach = float((np.abs(_wr) > 0.5).sum() / max(_n, 1))
     print(f"Buffer : {len(buffer)} transitions en {time.time() - t_start:.1f}s")
+    print(f"         reward/step = {_rate:.4f}   transitions à |r|>0.5 = {100 * _ach:.2f}%")
     print(f"         Mémoire buffer : {buffer.memory_usage_mb():.1f} MB")
     print()
 
@@ -1619,21 +2011,120 @@ def main():
         # Métriques fines pour les figures du paper (par LOG_INTERVAL)
         "loss_pg": [], "returns_mean": [], "values_mean": [],
         "return_scale": [], "return_p5": [], "return_p95": [], "ips": [],
+        # Diagnostics reward head + imagination. Ils n'existaient QUE dans le texte du
+        # log, or Kaggle tronque le début des gros logs (sur v52/v53, les lignes d'iter
+        # ne commencent qu'à ~8000) → les critères de succès du fix reward étaient
+        # illisibles sur les 40% initiaux du run. Ici ils atterrissent dans le summary
+        # JSON, qui couvre lui l'intégralité du run.
+        #   rew_pred_ach / rew_pred_zero : prédiction de la head sur les achievements
+        #     (cible ~1.0) et sur les états à reward nul (doit rester ~0). Restent
+        #     IN-SAMPLE (calculés sur le batch fitté) — ne pas y lire une capacité de
+        #     généralisation, cf. docs/HYPOTHESES.md H_313.
+        #   img_rew_max / img_rew_frac_hi : le reward que l'actor voit réellement dans
+        #     l'imagination. Si img_rew_max reste ~0, aucune trajectoire rêvée ne
+        #     contient de récompense de taille achievement.
+        "rew_pred_ach": [], "rew_pred_zero": [], "rew_n_ach": [],
+        "img_rew_mean": [], "img_rew_max": [], "img_rew_frac_hi": [],
         # Par EVAL
         "eval_iter": [], "eval_score": [], "eval_length": [], "eval_achievements": [],
         "eval_sample": [], "eval_detail": [], "eval_crafter_score": [],
         "eval_train_episodes": [],
     }
 
-    # Protocole Crafter officiel : compteurs sur les épisodes de TRAINING
+    # Protocole Crafter officiel : compteurs sur les épisodes de TRAINING.
+    # Repris du checkpoint si disponible : le crafter_score etant cumule depuis
+    # l'iteration 0, repartir de zero apres une reprise casserait la comparabilite
+    # avec la premiere moitie du run.
     train_episode_count = 0
     train_ach_counts = {}
+    _resumed_counters = {}
+    if args.resume_from:
+        # --resume_meta permet de REPARER une chaine cassee : un checkpoint produit
+        # avant que le meta ne transporte compteurs+historique (ou dont le parent
+        # n'avait pas propage les siens) laisse un trou. On fournit alors un meta
+        # recompose hors ligne, versionne dans le repo, qui prime sur celui du .npz.
+        _mp = Path(args.resume_meta) if args.resume_meta else \
+              Path(args.resume_from).with_suffix(".meta.json")
+        _meta = {}
+        if _mp.exists():
+            _meta = json.loads(_mp.read_text())
+            if args.resume_meta:
+                print(f"[resume] meta surchargé depuis {_mp}")
+        elif args.resume_meta:
+            sys.exit(f"ERREUR : --resume_meta introuvable : {_mp}")
+        _resumed_counters = _meta.get("counters", {}) or {}
+        if _resumed_counters:
+            train_ach_counts = dict(_resumed_counters.get("train_ach_counts", {}))
+            train_episode_count = int(_resumed_counters.get("train_episode_count", 0))
+            print(f"[resume] compteurs restaurés : {train_episode_count} épisodes, "
+                  f"{len(train_ach_counts)} achievements déjà vus")
+        else:
+            print("[resume] /!\\ pas de compteurs dans le meta (format ancien) : "
+                  "le crafter_score repart de zéro et n'est pas comparable au pré-reprise.")
+
+        # HISTORIQUE : on prefixe la courbe du parent pour que le summary de ce run
+        # couvre la chaine COMPLETE depuis l'iteration 0. Les points au-dela de
+        # start_iter sont ecartes (cas d'une reprise depuis un checkpoint qui n'est
+        # pas le dernier du parent) pour ne pas creer de discontinuite.
+        _hist = _meta.get("history") or {}
+        if _hist:
+            _keep = [j for j, i in enumerate(_hist.get("iter", [])) if i <= start_iter]
+            _keep_ev = [j for j, i in enumerate(_hist.get("eval_iter", [])) if i <= start_iter]
+            n_dense = n_eval = 0
+            for k, v in _hist.items():
+                if k not in history or not isinstance(v, list):
+                    continue
+                idx = _keep_ev if k.startswith("eval_") else _keep
+                if len(v) < (max(idx) + 1 if idx else 0):
+                    continue          # serie plus courte que 'iter' : on ne devine pas
+                history[k] = [v[j] for j in idx]
+                if k.startswith("eval_"):
+                    n_eval = len(history[k])
+                else:
+                    n_dense = len(history[k])
+            if n_dense == 0 and n_eval == 0:
+                raise SystemExit(
+                    f"ERREUR : le meta contient un historique "
+                    f"({len(_hist.get('iter', []))} points) mais AUCUN n'est <= "
+                    f"start_iter={start_iter}. Le meta et le checkpoint ne "
+                    "correspondent pas — verifier --resume_meta.")
+            print(f"[resume] historique restauré : {n_dense} points denses, "
+                  f"{n_eval} évals (jusqu'à iter {start_iter}) — la courbe couvre "
+                  "la chaîne complète.")
+        else:
+            print("[resume] /!\\ pas d'historique dans le meta : le summary ne couvrira "
+                  "que la portion post-reprise. Utiliser --resume_meta pour le réparer.")
+    # DIAGNOSTIC comportemental (cumulé sur les épisodes de train) :
+    #   diag_wood_hist  : distribution du max de bois atteint par épisode (0..5+).
+    #     place_table coûte 2 bois, la pioche +1 → si la masse est sur 0-1, tout le
+    #     craft est ARITHMÉTIQUEMENT hors de portée, quel que soit le modèle.
+    #   diag_action_counts : histogramme des 17 actions réellement jouées → distingue
+    #     "n'essaie jamais l'action" de "l'essaie mais échoue".
+    diag_wood_hist = np.array(_resumed_counters.get("diag_wood_hist") or [0] * 6,
+                              dtype=np.int64)
+    diag_action_counts = np.array(
+        _resumed_counters.get("diag_action_counts") or [0] * action_dim, dtype=np.int64)
+    diag_reached_stone = int(_resumed_counters.get("diag_reached_stone", 0))
 
     collected_rewards = []
-    # RSSM state multi-env pour la collecte
-    rssm_state_multi = rssm.init_state(n_envs)
-    prev_actions_oh_multi = jnp.zeros((n_envs, action_dim))
+    # RSSM state multi-env pour la collecte.
+    # Data-parallel : la collecte reste RÉPLIQUÉE (non shardée) — batch=n_envs,
+    # env CPU séquentiel. On place l'état initial répliqué pour rester cohérent
+    # avec act_fn_functional (out_shardings=repl).
+    rssm_state_multi = jax.device_put(rssm.init_state(n_envs), repl_sharding)
+    prev_actions_oh_multi = jax.device_put(
+        jnp.zeros((n_envs, action_dim)), repl_sharding)
 
+    # CHOIX RNG (data-parallel) : clé RÉPLIQUÉE sur tous les shards.
+    # jax.lax.axis_index('data') n'est PAS dispo en jit auto/GSPMD (contrairement
+    # à pmap/shard_map), donc pas de bruit distinct par shard sans pré-splitter
+    # une clé shardée. On choisit volontairement le simple : la même clé sur
+    # chaque shard. C'est acceptable car le BATCH diffère déjà par shard (split
+    # de la dim B) → les gradients diffèrent par shard, puis sont moyennés
+    # cross-shard automatiquement sous GSPMD. Le seul effet d'une clé répliquée
+    # est que le bruit stochastique interne (sample z du RSSM, sample actions en
+    # imagination) est corrélé entre shards — impact négligeable sur la
+    # dynamique d'apprentissage, et la non-régression 1-device est exacte.
     main_key = jr.PRNGKey(seed + 1)
     collect_per_iter = max(1, COLLECT_PER_ITER // n_envs)
     t_start = time.time()
@@ -1666,9 +2157,16 @@ def main():
 
     last_metrics = {}
 
-    # Best EVAL tracking (indépendant de auto_explore, qui peut être off)
+    # Best EVAL tracking (indépendant de auto_explore, qui peut être off).
+    # Reamorce sur l'historique restaure : sinon une reprise repart d'un best a 0,
+    # et la premiere eval du nouveau run — meme mauvaise — devient le "best".
     eval_best_ach = 0.0
     eval_best_iter = 0
+    if history["eval_achievements"]:
+        eval_best_ach = max(history["eval_achievements"])
+        eval_best_iter = history["eval_iter"][
+            history["eval_achievements"].index(eval_best_ach)]
+        print(f"[resume] best-so-far réamorcé : {eval_best_ach:.2f} @ iter {eval_best_iter}")
 
     # Profiler (no-op si --profile pas activé)
     prof = Profiler(enabled=args.profile)
@@ -1692,7 +2190,8 @@ def main():
     # garanti par la Phase 0 plus haut (warmup_steps >= SEQ_LEN).
     main_key, k_wm0, k_ac0 = jr.split(main_key, 3)
     batch_wm_next = buffer.sample_sequences(k_wm0, args.batch_size, SEQ_LEN)
-    batch_ac_next = buffer.sample_sequences(k_ac0, args.batch_size, SEQ_LEN)
+    batch_ac_next = buffer.sample_sequences(k_ac0, args.batch_size, SEQ_LEN,
+                                            priority_frac=args.replay_priority_frac)
 
     if start_iter > 0:
         print(f"[resume] Boucle reprise à iter {start_iter} (jusqu'à {args.train_iter})")
@@ -1711,20 +2210,38 @@ def main():
             rnd_coef_runtime = float(args.rnd_coef)
         # Sinon : rnd_coef_runtime est piloté par SAFEGUARD 2 (ajusté plus bas).
         rnd_coef_effective = rnd_coef_runtime
+        # ANNEALING (style Burda) : décroissance linéaire du coef vers 0 après le
+        # warmup → le bonus sert à explorer tôt puis s'efface pour laisser
+        # l'exploitation (extrinsèque) prendre le relais. Facteur 1.0 → 0.0.
+        if getattr(args, "rnd_anneal", False):
+            _w = int(args.rnd_warmup_steps)
+            if it >= _w:
+                _span = max(1, args.train_iter - _w)
+                rnd_coef_effective = rnd_coef_runtime * max(0.0, 1.0 - (it - _w) / _span)
 
         # ============ (a) Collecte
+        # UNIMIX décroissant (exploration d'amorçage) : linéaire init → final sur
+        # unimix_decay_iters, puis constant. jnp scalaire → un seul trace jit.
+        if args.unimix_decay_iters > 0:
+            _frac = min(1.0, it / float(args.unimix_decay_iters))
+            _u = args.unimix_init + _frac * (args.unimix_final - args.unimix_init)
+        else:
+            _u = args.unimix_final
+        unimix_now = jnp.array(_u, dtype=jnp.float32)
+
         for _ in range(collect_per_iter):
             # --- act_fn (jit) : encode + observe RSSM + sample action
             # FIX 1 : version functional → utilise les states (params à jour)
             # sans muter les modules originaux. FIX 3 : device_put explicite.
             prof.tic("act_fn")
             obs_batch_np = np.stack(obs_list)  # (N, C, H, W)
-            obs_batch_jax = jax.device_put(obs_batch_np)
+            # Collecte répliquée (non shardée) : obs sur tous les devices.
+            obs_batch_jax = jax.device_put(obs_batch_np, repl_sharding)
             main_key, subk = jr.split(main_key)
             new_state, actions_int = act_fn_func(
                 wm_state, ac_state,
                 rssm_state_multi, prev_actions_oh_multi,
-                obs_batch_jax, subk,
+                obs_batch_jax, subk, unimix_now,
             )
             # Force materialize en numpy avant env.step (sync nécessaire car
             # actions_int doit être lu pour driver l'env Python).
@@ -1746,6 +2263,13 @@ def main():
                     if done:
                         # Achievements de l'épisode AVANT le reset (score Crafter officiel)
                         ep_unlocked = sorted(env.unlocked_names)
+                        # DIAGNOSTIC comportemental : inventaire max atteint + actions
+                        # tentées, relevés AVANT le reset (sinon perdus).
+                        _inv = env.inv_max
+                        diag_wood_hist[min(_inv.get("wood", 0), 5)] += 1
+                        if _inv.get("stone", 0) > 0:
+                            diag_reached_stone += 1
+                        diag_action_counts += env.action_counts
                         next_obs = env.reset()
                     results.append((next_obs, r, done, ep_unlocked))
             prof.toc()
@@ -1768,7 +2292,8 @@ def main():
             if args.use_rnd and rnd_bonus_fn is not None and rnd_coef_effective > 0.0:
                 # CrafterEnv retourne déjà [0,1], pas de /255 (double-normalisation bug fixé)
                 next_obs_np = np.stack([results[i][0] for i in range(n_envs)]).astype(np.float32)
-                next_obs_jax = jax.device_put(next_obs_np)
+                # Collecte répliquée (cohérent avec rnd_state répliqué).
+                next_obs_jax = jax.device_put(next_obs_np, repl_sharding)
                 rnd_state, bonus_jax = rnd_bonus_fn(rnd_state, next_obs_jax)
                 rnd_bonuses = np.array(bonus_jax)  # (n_envs,)
 
@@ -1814,12 +2339,13 @@ def main():
             prof.toc()
 
             prof.tic("transfer")
-            # FIX 3 : device_put au lieu de jnp.array
+            # FIX 3 : device_put au lieu de jnp.array.
+            # Data-parallel : collecte répliquée (cohérent avec act_fn_functional).
             rssm_state_multi = {
-                "h": jax.device_put(new_h_arr),
-                "z": jax.device_put(new_z_arr),
+                "h": jax.device_put(new_h_arr, repl_sharding),
+                "z": jax.device_put(new_z_arr, repl_sharding),
             }
-            prev_actions_oh_multi = jax.device_put(new_prev_actions)
+            prev_actions_oh_multi = jax.device_put(new_prev_actions, repl_sharding)
             prof.toc()
 
         # ============ (b) Train WM (avec double-buffering du sample)
@@ -1865,10 +2391,21 @@ def main():
             prof.toc()
 
         # ============ (c) Train AC (avec double-buffering du sample)
+        # AC WARMUP : geler l'actor-critic pendant les ac_warmup_iters premières
+        # itérations — le WM apprend seul (collecte via l'actor uniforme zero-init
+        # = exploration random). Sans ce gel, l'AC apprend sur un WM encore nul :
+        # returns imaginés = bruit biaisé positif → chaque action échantillonnée
+        # est renforcée (rich-get-richer) → verrouillage de la politique. Mesuré :
+        # H 2.5→0.08-0.18 en <200 iters sur TOUS les runs 75M (actor >=1024),
+        # alors que le 14M (actor 2x256) résiste (H 2.59 -> 1.73 en douceur).
+        ac_frozen = it < args.ac_warmup_iters
+        # jnp.array (dynamique) → un seul trace jit pour les deux phases.
+        actor_coef = jnp.array(0.0 if ac_frozen else 1.0, dtype=jnp.float32)
         prof.tic("sample_batch")
         batch_ac_current = batch_ac_next
         main_key, subk = jr.split(main_key)
-        batch_ac_next = buffer.sample_sequences(subk, args.batch_size, SEQ_LEN)
+        batch_ac_next = buffer.sample_sequences(subk, args.batch_size, SEQ_LEN,
+                                                priority_frac=args.replay_priority_frac)
         prof.toc()
 
         prof.tic("train_ac")
@@ -1882,20 +2419,20 @@ def main():
             ac_state, slow_state, return_ema_std, ac_metrics = train_ac_fn_adaptive(
                 wm_state, ac_state, slow_state,
                 batch_ac_current, return_ema_std, subk,
-                effective_alpha,
+                effective_alpha, actor_coef,
             )
         else:
             ent_coef_eff = float(args.entropy_coef) * auto_explore_multiplier
             ac_state, slow_state, return_ema_std, ac_metrics = train_ac_fn(
                 wm_state, ac_state, slow_state,
                 batch_ac_current, return_ema_std, subk,
-                ent_coef_eff,
+                ent_coef_eff, actor_coef,
             )
         last_metrics.update(ac_metrics)
         prof.toc()
 
         # ---- Train adaptive alpha (après le train AC, utilise mean_H observé)
-        if args.adaptive_alpha and train_alpha_fn is not None:
+        if not ac_frozen and args.adaptive_alpha and train_alpha_fn is not None:
             mean_H = ac_metrics["H"]
             # SAFEGUARD 4 : H_target curriculum (linear schedule)
             h_target_cur = get_h_target(it, args)
@@ -1906,11 +2443,13 @@ def main():
             current_alpha_val = float(alpha_metrics["alpha"])
             last_metrics["alpha"] = alpha_metrics["alpha"]
 
-        # Train steps additionnels (cas ac_train_per_iter > 1)
+        # Train steps additionnels (cas ac_train_per_iter > 1). Pendant le warmup
+        # (actor_coef=0), ces steps continuent d'entraîner le CRITIC.
         for _ in range(args.ac_train_per_iter - 1):
             prof.tic("sample_batch")
             main_key, subk = jr.split(main_key)
-            batch_extra = buffer.sample_sequences(subk, args.batch_size, SEQ_LEN)
+            batch_extra = buffer.sample_sequences(subk, args.batch_size, SEQ_LEN,
+                                                  priority_frac=args.replay_priority_frac)
             prof.toc()
             prof.tic("train_ac")
             main_key, subk = jr.split(main_key)
@@ -1921,18 +2460,18 @@ def main():
                 ac_state, slow_state, return_ema_std, ac_metrics = train_ac_fn_adaptive(
                     wm_state, ac_state, slow_state,
                     batch_extra, return_ema_std, subk,
-                    effective_alpha,
+                    effective_alpha, actor_coef,
                 )
             else:
                 ent_coef_eff = float(args.entropy_coef) * auto_explore_multiplier
                 ac_state, slow_state, return_ema_std, ac_metrics = train_ac_fn(
                     wm_state, ac_state, slow_state,
                     batch_extra, return_ema_std, subk,
-                    ent_coef_eff,
+                    ent_coef_eff, actor_coef,
                 )
             last_metrics.update(ac_metrics)
             prof.toc()
-            if args.adaptive_alpha and train_alpha_fn is not None:
+            if not ac_frozen and args.adaptive_alpha and train_alpha_fn is not None:
                 mean_H = ac_metrics["H"]
                 # FIX : utiliser le schedule (comme la boucle principale),
                 # pas args.h_target brut (=2.0) qui ignorait h_target_schedule.
@@ -1967,6 +2506,13 @@ def main():
             history["return_p5"].append(float(return_ema_std[0]))
             history["return_p95"].append(float(return_ema_std[1]))
             history["ips"].append(float(ips))
+            # Diagnostics reward head + imagination (cf. commentaire à l'init de history)
+            history["rew_pred_ach"].append(vals.get("rew_pred_ach", 0.0))
+            history["rew_pred_zero"].append(vals.get("rew_pred_zero", 0.0))
+            history["rew_n_ach"].append(vals.get("rew_n_ach", 0.0))
+            history["img_rew_mean"].append(vals.get("img_rew_mean", 0.0))
+            history["img_rew_max"].append(vals.get("img_rew_max", 0.0))
+            history["img_rew_frac_hi"].append(vals.get("img_rew_frac_hi", 0.0))
 
             # ETA : iters restants × temps moyen par iter écoulé
             iters_left = args.train_iter - (it + 1)
@@ -1982,12 +2528,17 @@ def main():
             print(
                 f"  iter {it+1:5d}/{args.train_iter} [{pct:4.1f}%] | "
                 f"WM wm={vals.get('loss_wm', 0):.2f} rec={vals.get('loss_recon', 0):.2f} "
-                f"kl={vals.get('loss_kl', 0):.2f} rew={vals.get('loss_reward', 0):.3f} con={vals.get('loss_continue', 0):.3f} | "
+                f"kl={vals.get('loss_kl', 0):.2f} rew={vals.get('loss_reward', 0):.3f} con={vals.get('loss_continue', 0):.3f} "
+                f"rew@ach={vals.get('rew_pred_ach', 0):.2f}/{vals.get('rew_true_ach', 0):.2f}"
+                f"(n={vals.get('rew_n_ach', 0):.0f}) rew@0={vals.get('rew_pred_zero', 0):+.3f} | "
                 f"AC act={vals.get('loss_actor', 0):.3f} crit={vals.get('loss_critic', 0):.3f} "
                 f"pg={vals.get('loss_actor_pg', 0):.3f} H={vals.get('entropy', 0):.2f} | "
                 f"img ret={vals.get('returns_mean', 0):.2f} val={vals.get('values_mean', 0):.2f} "
+                f"imgR(mu={vals.get('img_rew_mean', 0):.3f} max={vals.get('img_rew_max', 0):.2f} "
+                f"p99={vals.get('img_rew_p99', 0):.2f} hi={100*vals.get('img_rew_frac_hi', 0):.2f}%) "
                 f"scale={vals.get('return_scale', 1.0):.2f} p5={float(return_ema_std[0]):.2f} p95={float(return_ema_std[1]):.2f}"
                 f"{alpha_tag}{ax_tag}{rnd_tag}{h_tgt_tag} | "
+                f"umix={float(_u):.3f} | "
                 f"r/step={history['env_reward_per_step'][-1]:.4f} | {ips:.1f} ips ETA {eta_tag}"
             )
 
@@ -2076,6 +2627,45 @@ def main():
             else:
                 print(f"      unlocked (0/{len(ACHIEVEMENTS)}): — aucun achievement débloqué")
 
+            # Détail sur les épisodes de TRAIN (n = centaines) : 40× moins bruité que
+            # l'éval (n=EVAL_EPISODES) et c'est la base du crafter_score. Surtout :
+            # un achievement à 0 occurrence ici = ZÉRO exemple dans le buffer, donc la
+            # reward head ne peut PAS l'apprendre (problème de donnée, pas de head).
+            if train_episode_count > 0:
+                train_ranked = sorted(train_ach_counts.items(), key=lambda kv: -kv[1])
+                train_str = "  ".join(
+                    f"{n}={c}({100.0*c/train_episode_count:.1f}%)" for n, c in train_ranked
+                ) or "— aucun"
+                never = [a for a in ACHIEVEMENTS if train_ach_counts.get(a, 0) == 0]
+                print(f"      TRAIN ({len(train_ranked)}/{len(ACHIEVEMENTS)} sur {train_episode_count} eps): {train_str}")
+                print(f"      JAMAIS vus en train ({len(never)}) : {'  '.join(never) if never else '—'}")
+
+            # ---- DIAGNOSTIC COMPORTEMENTAL (le "pourquoi" du plafond)
+            # 1) BOIS : place_table coûte 2 bois, +1 pour la pioche → sans épisodes
+            #    à wood>=2, tout le craft est hors de portée par ARITHMÉTIQUE.
+            # 2) ACTIONS : une politique effondrée n'essaie que 2-3 actions sur 17 ;
+            #    les actions de craft ne sont alors JAMAIS tentées (≠ "mal apprises").
+            _nw = int(diag_wood_hist.sum())
+            if _nw > 0:
+                _pct = 100.0 / _nw
+                print(f"      BOIS/épisode (n={_nw}): "
+                      + "  ".join(f"{k}{'+' if k == 5 else ''}={diag_wood_hist[k] * _pct:.1f}%"
+                                  for k in range(6))
+                      + f"  | >=2 bois (table possible): {diag_wood_hist[2:].sum() * _pct:.1f}%"
+                      + f"  | >=3 (pioche): {diag_wood_hist[3:].sum() * _pct:.1f}%"
+                      + f"  | a eu de la pierre: {100.0 * diag_reached_stone / _nw:.2f}%")
+            _na = int(diag_action_counts.sum())
+            if _na > 0:
+                _order = np.argsort(-diag_action_counts)
+                _top = "  ".join(f"{ACTION_NAMES[i]}={100.0 * diag_action_counts[i] / _na:.1f}%"
+                                 for i in _order[:5])
+                _used = int((diag_action_counts > 0.01 * _na).sum())
+                _pt = diag_action_counts[ACTION_NAMES.index("place_table")]
+                _mp = diag_action_counts[ACTION_NAMES.index("make_wood_pickaxe")]
+                print(f"      ACTIONS top5: {_top}  | {_used}/17 actions >1%"
+                      f"  | place_table tenté {100.0 * _pt / _na:.2f}%"
+                      f"  | make_wood_pickaxe tenté {100.0 * _mp / _na:.2f}%")
+
             # ---- Auto-explore : détection de stagnation
             if args.auto_explore:
                 # Progrès = ach_now > best × (1 + threshold)
@@ -2101,11 +2691,17 @@ def main():
                         auto_explore_multiplier = new_mult
                         auto_explore_consec_stag = 0
 
-            # Save checkpoint léger (state dicts)
+            # Save checkpoint léger (state dicts) + extras de reprise (Adam, scale EMA)
             ckpt_path = ckpt_dir / f"dreamer_crafter_jax_{args.run_name}_iter{it+1:06d}.npz"
             save_checkpoint(
                 ckpt_path, enc_eval, rssm_eval, dec_eval, rew_eval, cont_eval,
                 actor_eval, critic_eval, slow_eval, it + 1, args, history,
+                opt_wm=_opt, opt_ac=_opt_ac, return_ema_std=return_ema_std,
+                counters={"train_ach_counts": train_ach_counts,
+                          "train_episode_count": train_episode_count,
+                          "diag_wood_hist": diag_wood_hist,
+                          "diag_action_counts": diag_action_counts,
+                          "diag_reached_stone": diag_reached_stone},
             )
             print(f"  Checkpoint saved : {ckpt_path.name}")
 
@@ -2185,6 +2781,12 @@ def main():
     save_checkpoint(
         final_ckpt, enc_f, rssm_f, dec_f, rew_f, cont_f,
         actor_f, critic_f, slow_f, args.train_iter, args, history,
+        opt_wm=opt_wm, opt_ac=opt_ac, return_ema_std=return_ema_std,
+        counters={"train_ach_counts": train_ach_counts,
+                  "train_episode_count": train_episode_count,
+                  "diag_wood_hist": diag_wood_hist,
+                  "diag_action_counts": diag_action_counts,
+                  "diag_reached_stone": diag_reached_stone},
     )
     print(f"Final checkpoint : {final_ckpt}")
 
@@ -2193,14 +2795,43 @@ def main():
     print("=" * 60)
 
 
+def _jsonable(obj):
+    """Convertit numpy/jax en types JSON natifs, recursivement."""
+    if isinstance(obj, dict):
+        return {k: _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(v) for v in obj]
+    if hasattr(obj, "tolist"):
+        return obj.tolist()
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    return obj
+
+
 def save_checkpoint(path, encoder, rssm, decoder, reward_head, continue_head,
-                    actor, critic, slow_critic, it, args, history):
+                    actor, critic, slow_critic, it, args, history,
+                    opt_wm=None, opt_ac=None, return_ema_std=None, counters=None):
     """
     Sauvegarde via numpy npz : convertit chaque state nnx.Param en numpy.
     Format simple (pas orbax) pour rester portable et minimal.
+
+    Les clés `<module>.<path>` sont le format historique (lu par visualize_jax.py et
+    experiments/credit_assignment_probe.py) — ne pas les renommer.
+
+    Extras optionnels, préfixés `__` pour ne pas collisionner avec un nom de module :
+      __opt_wm.*, __opt_ac.*  : état Adam (m/v). Sans eux, un --resume_from redémarre
+                                l'optimiseur à froid.
+      __return_ema_std        : les percentiles EMA P5/P95 du return. Sans eux, le
+                                scale repart de son init (≈1.0) alors qu'un run mature
+                                tourne à 5-8 → advantages gonflés d'autant pendant
+                                plusieurs centaines d'itérations après la reprise.
+    Le buffer et la PRNG key restent non sauvés (volumineux / peu utiles) : la reprise
+    reste donc « soft », mais sans le saut de scale qui était le vrai danger.
     """
-    def state_to_numpy(m):
-        params = nnx.state(m, nnx.Param)
+    def state_to_numpy(m, filt=nnx.Param):
+        params = nnx.state(m, filt) if filt is not None else nnx.state(m)
         return {k: np.array(v) for k, v in flatten_state(params).items()}
 
     payload = {}
@@ -2212,11 +2843,37 @@ def save_checkpoint(path, encoder, rssm, decoder, reward_head, continue_head,
         for k, v in state_to_numpy(m).items():
             payload[f"{name}.{k}"] = v
 
+    for name, opt in (("__opt_wm", opt_wm), ("__opt_ac", opt_ac)):
+        if opt is None:
+            continue
+        try:
+            for k, v in state_to_numpy(opt, filt=None).items():
+                payload[f"{name}.{k}"] = v
+        except Exception as e:            # non fatal : le checkpoint reste utilisable
+            print(f"  [ckpt] état optimizer {name} non sauvé ({type(e).__name__}: {e})")
+
+    if return_ema_std is not None:
+        payload["__return_ema_std"] = np.array(return_ema_std)
+
     np.savez_compressed(path, **payload)
-    # Metadata side file (JSON)
+    # Metadata side file (JSON). `counters` permet a une reprise de continuer le
+    # crafter_score sur la meme base : il est cumule depuis l'iteration 0 (protocole
+    # officiel), donc repartir de zero rendrait la metrique incomparable de part et
+    # d'autre de la reprise.
     meta_path = path.with_suffix(".meta.json")
+    meta = {"iter": int(it), "args": vars(args)}
+    # L'HISTORIQUE voyage avec le checkpoint, au meme titre que les compteurs : sans
+    # lui, le summary d'un run repris ne contient que la portion post-reprise et la
+    # courbe d'apprentissage est amputee de tout son debut (cf. v58, ou le
+    # crafter_score cumule sur la seule fin de chaine surestimait de 14.17% vs 9.18%).
+    if history is not None:
+        meta["history"] = _jsonable(history)
+    if counters is not None:
+        meta["counters"] = {k: (dict(v) if isinstance(v, dict) else
+                                (v.tolist() if hasattr(v, "tolist") else v))
+                            for k, v in counters.items()}
     with open(meta_path, "w") as f:
-        json.dump({"iter": int(it), "args": vars(args)}, f, indent=2)
+        json.dump(meta, f, indent=2)
 
 
 def _set_at_path(state, path_parts, value):
@@ -2245,7 +2902,37 @@ def _set_at_path(state, path_parts, value):
         node[leaf_key] = jnp.asarray(value)
 
 
-def load_checkpoint_into_modules(path, named_modules):
+def load_optimizer_state(path, named_optimizers) -> int:
+    """Recharge l'etat interne des optimizers (Adam mu/nu, count) depuis un checkpoint.
+
+    Sans ca, une reprise redemarre Adam a froid : les moments valent 0, donc les
+    premiers pas sont mal calibres (le pas effectif d'Adam vaut ~lr quel que soit le
+    gradient tant que mu/nu n'ont pas chauffe) — exactement au moment ou le modele
+    est le plus fragile.
+
+    named_optimizers : {prefixe: nnx.Optimizer}, memes prefixes qu'a la sauvegarde
+    (`__opt_wm`, `__opt_ac`). Retourne le nombre de tenseurs restaures.
+    """
+    ckpt = np.load(path, allow_pickle=False)
+    total = 0
+    for prefix, opt in named_optimizers.items():
+        state = nnx.state(opt)
+        expected = flatten_state(state)
+        found = 0
+        for key in expected:
+            full = f"{prefix}.{key}"
+            if full in ckpt.files:
+                _set_at_path(state, key.split("."), ckpt[full])
+                found += 1
+        if found:
+            nnx.update(opt, state)
+            total += found
+        print(f"[resume]   {prefix} : {found}/{len(expected)} tenseurs"
+              + ("" if found else "  (absent du checkpoint — Adam repart a froid)"))
+    return total
+
+
+def load_checkpoint_into_modules(path, named_modules, meta_override=None):
     """
     Charge un checkpoint .npz (format save_checkpoint) dans les modules.
 
@@ -2257,30 +2944,61 @@ def load_checkpoint_into_modules(path, named_modules):
         named_modules : dict {prefix: module} (mêmes prefixes que save_checkpoint)
 
     Returns:
-        start_iter (int) : l'itération du checkpoint (0 si meta absent).
+        start_iter (int) : l'itération du checkpoint. Sort en erreur si le meta
+        est absent : une reprise sans iteration connue casse historique et compteurs.
     """
     path = Path(path)
     ckpt = np.load(path, allow_pickle=False)
     print(f"[resume] {len(ckpt.files)} clés chargées depuis {path.name}")
 
+    mismatches = []
     for prefix, module in named_modules.items():
         state = nnx.state(module, nnx.Param)
         expected = flatten_state(state)
         missing = 0
-        for key in expected:
+        for key, cur in expected.items():
             full_key = f"{prefix}.{key}"
-            if full_key in ckpt.files:
-                _set_at_path(state, key.split("."), ckpt[full_key])
-            else:
+            if full_key not in ckpt.files:
                 missing += 1
+                continue
+            # VERIFIER LA SHAPE avant d'ecraser : sans ce test, un checkpoint d'une
+            # autre architecture se "charge" sans erreur (les tenseurs sont remplaces
+            # tels quels) et n'explose qu'au premier forward, loin de la cause.
+            want = getattr(cur, "shape", None) if not hasattr(cur, "value") else \
+                   getattr(cur.value, "shape", None)
+            got = ckpt[full_key].shape
+            if want is not None and tuple(want) != tuple(got):
+                mismatches.append(f"{full_key} : modele {tuple(want)} vs checkpoint {tuple(got)}")
+                continue
+            _set_at_path(state, key.split("."), ckpt[full_key])
         tag = f" ({missing} clés manquantes !)" if missing else ""
         print(f"[resume]   {prefix} OK{tag}")
 
+    if mismatches:
+        raise SystemExit(
+            "ERREUR : le checkpoint ne correspond PAS a l'architecture construite "
+            f"({len(mismatches)} tenseurs incompatibles). Les 5 premiers :\n  "
+            + "\n  ".join(mismatches[:5])
+            + "\n\nUne reprise doit utiliser l'architecture du checkpoint. Elle est "
+              "dans son .meta.json (cle args) et devrait etre appliquee "
+              "automatiquement — verifier que le meta accompagne bien le .npz.")
+
     start_iter = 0
-    meta_path = path.with_suffix(".meta.json")
+    meta_path = Path(meta_override) if meta_override else path.with_suffix(".meta.json")
     if meta_path.exists():
         with open(meta_path) as f:
             start_iter = int(json.load(f).get("iter", 0))
+    if start_iter == 0:
+        # Un checkpoint qu'on recharge est par definition posterieur a l'iteration 0.
+        # Retomber a 0 en silence, c'est la classe de bug qui a coute 12 h de TPU sur
+        # v57 : le run repart, l'historique est filtre a vide, et rien ne le signale.
+        raise SystemExit(
+            f"ERREUR : impossible de determiner l'iteration de reprise.\n"
+            f"  checkpoint : {path}\n"
+            f"  meta cherche : {meta_path} ({'absent' if not meta_path.exists() else 'sans cle iter'})\n"
+            "Le .meta.json doit accompagner le .npz (meme prefixe), ou etre fourni via "
+            "--resume_meta. Sans lui, les compteurs, l'historique et le numero "
+            "d'iteration sont perdus.")
     print(f"[resume] reprise à iter {start_iter}")
     return start_iter
 

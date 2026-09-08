@@ -2,7 +2,8 @@
 Decoder pour le World Model — version JAX/Flax NNX.
 
 Deux variantes :
-    - Decoder    : MLP, retourne LOGITS pour obs binaire (Tetris, BCEWithLogitsLoss)
+    - Decoder    : MLP, LOGITS pour obs binaire. Vestige de l'étape 1 du projet,
+                   inutilisé par Crafter — gardé car générique.
     - CNNDecoder : Transposed conv, retourne RECONSTRUCTION pour images RGB
                     (Crafter, MSE loss style DreamerV3)
 
@@ -55,7 +56,8 @@ class CNNDecoder(nnx.Module):
 
     Architecture : linear → reshape → 4 transposed conv (upsample ×16).
     Input  : (B, state_dim) ou (B, T, state_dim)
-    Output : (B, C, H, W) ou (B, T, C, H, W) — pixels en [0, 1] (sigmoid à la fin)
+    Output : (B, C, H, W) ou (B, T, C, H, W) — sortie LINÉAIRE + 0.5 (pas de sigmoid,
+             cf. __call__ : le réseau apprend obs - 0.5)
              Format NCHW pour compatibilité avec le pipeline de données.
 
     Note JAX : ConvTranspose opère en NHWC. On transpose NHWC → NCHW à la sortie.
@@ -106,13 +108,18 @@ class CNNDecoder(nnx.Module):
             kernel_size=(4, 4), strides=(2, 2), padding="SAME", rngs=rngs,
         )
 
+        # LayerNorm après chaque deconv (sauf la sortie) — cf. encoder, DreamerV3 canonique.
+        self.dnorm1 = nnx.LayerNorm(c * 4, epsilon=1e-5, rngs=rngs)
+        self.dnorm2 = nnx.LayerNorm(c * 2, epsilon=1e-5, rngs=rngs)
+        self.dnorm3 = nnx.LayerNorm(c, epsilon=1e-5, rngs=rngs)
+
     def __call__(self, state: jax.Array) -> jax.Array:
         """
         Args:
             state : (B, state_dim) ou (B, T, state_dim)
 
         Returns:
-            recon : (B, C, H, W) ou (B, T, C, H, W) — pixels en [0, 1], NCHW
+            recon : (B, C, H, W) ou (B, T, C, H, W) — NCHW, sortie linéaire + 0.5
         """
         orig_shape = state.shape
         if state.ndim == 3:
@@ -126,11 +133,15 @@ class CNNDecoder(nnx.Module):
         # Reshape en feature map NHWC : (BT, H, W, C)
         x = x.reshape(-1, self.initial_res, self.initial_res, self.initial_channels)
 
-        x = jax.nn.silu(self.deconv1(x))                          # (BT, 8, 8, c*4)
-        x = jax.nn.silu(self.deconv2(x))                          # (BT, 16, 16, c*2)
-        x = jax.nn.silu(self.deconv3(x))                          # (BT, 32, 32, c)
+        x = jax.nn.silu(self.dnorm1(self.deconv1(x)))              # (BT, 8, 8, c*4)
+        x = jax.nn.silu(self.dnorm2(self.deconv2(x)))              # (BT, 16, 16, c*2)
+        x = jax.nn.silu(self.dnorm3(self.deconv3(x)))              # (BT, 32, 32, c)
         x = self.deconv4(x)                                       # (BT, 64, 64, out_ch)
-        x = jax.nn.sigmoid(x)
+        # Sortie LINÉAIRE + 0.5 (DreamerV3 canonique, symoon11 decoder.py:74) au lieu de
+        # sigmoid. FIX CLÉ : les sprites Crafter sont saturés (pixels ≈0 ou ≈1) et
+        # σ'(x)=σ(1-σ) → 0 précisément là ; le gradient s'annulait donc sur les contours
+        # et les chiffres d'inventaire — exactement l'information dont dépend le craft.
+        x = x + 0.5
 
         # NHWC → NCHW pour compatibilité pipeline
         x = jnp.transpose(x, (0, 3, 1, 2))                       # (BT, C, H, W)

@@ -1,0 +1,9 @@
+iter,env_steps,score,length,achievements,sample,crafter_score,n_unlocked,unlocked_detail
+2500,80000,1.3933333333333329,182.26666666666668,2.3066666666666666,2.2,1.7902376543686205,5,collect_drink:8;collect_sapling:97;collect_wood:21;eat_cow:7;wake_up:97
+5000,160000,2.259999999999999,194.38666666666666,3.16,3.0,1.7699678514049833,7,collect_drink:8;collect_sapling:99;collect_wood:9;eat_cow:8;place_plant:93;place_table:1;wake_up:97
+7500,240000,2.579999999999999,185.78666666666666,3.493333333333333,3.6,1.7761114941687763,8,collect_drink:43;collect_sapling:99;collect_wood:80;defeat_zombie:3;eat_cow:7;place_plant:12;place_table:9;wake_up:97
+10000,320000,2.5266666666666664,184.50666666666666,3.48,2.8,1.996920937270084,7,collect_drink:47;collect_sapling:99;collect_wood:64;eat_cow:5;place_plant:28;place_table:7;wake_up:99
+12500,400000,2.126666666666666,186.26666666666668,3.026666666666667,3.6,1.9869997016352463,8,collect_drink:27;collect_sapling:100;collect_wood:35;defeat_zombie:3;eat_cow:3;place_plant:39;place_table:1;wake_up:96
+15000,480000,2.339999999999999,191.4,3.24,4.0,1.9906663334552066,7,collect_drink:25;collect_sapling:99;collect_wood:28;defeat_zombie:7;eat_cow:5;place_plant:69;wake_up:91
+17500,560000,1.8866666666666658,181.01333333333332,2.7866666666666666,2.4,2.0132985557909238,6,collect_drink:13;collect_sapling:99;collect_wood:3;eat_cow:3;place_plant:64;wake_up:97
+20000,640000,1.9666666666666663,184.0,2.88,3.4,2.0202242475318988,7,collect_drink:11;collect_sapling:100;collect_wood:24;defeat_zombie:9;eat_cow:4;place_plant:40;wake_up:100

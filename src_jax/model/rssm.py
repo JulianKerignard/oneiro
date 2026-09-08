@@ -31,7 +31,7 @@ Notes JAX :
 import jax
 import jax.numpy as jnp
 from flax import nnx
-import distrax
+from .distributions import Categorical
 
 
 # ============================================================== Custom GRU Cell
@@ -40,10 +40,11 @@ class CustomGRUCell(nnx.Module):
     """
     GRU cell qui matche EXACTEMENT PyTorch nn.GRUCell.
 
-    Différence vs nnx.GRUCell standard :
-      - dense_h utilise use_bias=True (les biais b_hr, b_hz, b_hn sont présents)
-      - Pour le gate n : tanh(W_in·x + b_in + r * (W_hn·h + b_hn))
-        (r multiplie aussi b_hn, conforme PyTorch).
+    /!\ Le nom est historique : cette cellule ne matche PLUS nn.GRUCell de PyTorch.
+    Les deux Linear sont `use_bias=False` et un LayerNorm les suit — c'est le LayerNorm
+    qui porte scale et biais (aligné symoon11 / DreamerV3). Le LayerNorm dans la cellule
+    récurrente stabilise l'amplitude de h sous replay intensif : sans lui h dérive et les
+    gates sigmoid/tanh saturent.
 
     PyTorch nn.GRUCell formule officielle :
         r = sigmoid(W_ir·x + b_ir + W_hr·h + b_hr)
@@ -53,18 +54,20 @@ class CustomGRUCell(nnx.Module):
 
     Ordre des gates concaténés : (r, z, n) — identique à PyTorch (weight_ih ordonné rzn).
 
-    API compatible avec le test de parité numérique :
-      self.dense_i.kernel : (in, 3*hidden)
-      self.dense_i.bias   : (3*hidden,)
-      self.dense_h.kernel : (hidden, 3*hidden)
-      self.dense_h.bias   : (3*hidden,)
+    Paramètres : dense_i.kernel (in, 3*hidden), dense_h.kernel (hidden, 3*hidden),
+    plus les scale/bias des deux LayerNorm. Pas de `.bias` sur les Linear.
     """
 
     def __init__(self, input_size: int, hidden_size: int, *, rngs: nnx.Rngs):
         self.input_size = input_size
         self.hidden_size = hidden_size
-        self.dense_i = nnx.Linear(input_size, 3 * hidden_size, use_bias=True, rngs=rngs)
-        self.dense_h = nnx.Linear(hidden_size, 3 * hidden_size, use_bias=True, rngs=rngs)
+        # use_bias=False : le LayerNorm qui suit porte le scale/bias (aligné symoon11/DreamerV3).
+        self.dense_i = nnx.Linear(input_size, 3 * hidden_size, use_bias=False, rngs=rngs)
+        self.dense_h = nnx.Linear(hidden_size, 3 * hidden_size, use_bias=False, rngs=rngs)
+        # LayerNorm DANS la cellule récurrente : stabilise l'amplitude de h sous
+        # replay intensif (sans ça, h dérive → gates sigmoid/tanh saturent → WM diverge).
+        self.norm_i = nnx.LayerNorm(3 * hidden_size, rngs=rngs)
+        self.norm_h = nnx.LayerNorm(3 * hidden_size, rngs=rngs)
 
     def __call__(self, h_prev: jax.Array, x: jax.Array) -> tuple[jax.Array, jax.Array]:
         """
@@ -75,8 +78,8 @@ class CustomGRUCell(nnx.Module):
         Returns:
             (new_h, new_h) tuple — convention nnx.GRUCell : (carry, output) identiques.
         """
-        gates_i = self.dense_i(x)        # (B, 3*hidden)
-        gates_h = self.dense_h(h_prev)   # (B, 3*hidden)
+        gates_i = self.norm_i(self.dense_i(x))        # (B, 3*hidden) + LayerNorm
+        gates_h = self.norm_h(self.dense_h(h_prev))   # (B, 3*hidden) + LayerNorm
 
         # Split en 3 dans l'ordre PyTorch : (r, z, n)
         r_i, z_i, n_i = jnp.split(gates_i, 3, axis=-1)
@@ -121,8 +124,8 @@ def sample_categorical_straight_through(
     # Mix avec uniforme pour éviter les distributions dégénérées
     probs = (1.0 - uniform_mix) * probs + uniform_mix / num_classes
 
-    # Sample catégorique via distrax (opère sur la dernière dim)
-    sample_idx = distrax.Categorical(probs=probs).sample(seed=key)
+    # Sample catégorique (Categorical maison, jax pur) (opère sur la dernière dim)
+    sample_idx = Categorical(probs=probs).sample(seed=key)
     sample_onehot = jax.nn.one_hot(sample_idx, num_classes, dtype=probs.dtype)
 
     # Straight-through : forward = sample_onehot, backward = probs (différentiable)
@@ -154,12 +157,12 @@ class RSSM(nnx.Module):
         self.z_dim = z_categories * z_classes
         self.hidden_dim = hidden_dim
 
-        # ----- pre_gru : (z + action) → hidden_dim  (Linear + LayerNorm + ELU)
+        # ----- pre_gru : (z + action) → hidden_dim  (Linear + LayerNorm + SiLU)
         self.pre_gru_linear = nnx.Linear(self.z_dim + action_dim, hidden_dim, rngs=rngs)
         self.pre_gru_norm = nnx.LayerNorm(hidden_dim, epsilon=1e-5, rngs=rngs)
 
         # ----- GRU cell : hidden_dim input, h_dim hidden
-        # CustomGRUCell : matche PyTorch nn.GRUCell (bias_ih + bias_hh tous deux présents)
+        # CustomGRUCell : GRU + LayerNorm sur les gates (cf. sa docstring)
         # Signature : (h_prev, x) → (new_h, new_h)  (tuple comme nnx.GRUCell)
         self.gru = CustomGRUCell(input_size=hidden_dim, hidden_size=h_dim, rngs=rngs)
 
@@ -195,16 +198,16 @@ class RSSM(nnx.Module):
     # --------------------------------------------------------- internal nets
 
     def _pre_gru(self, x: jax.Array) -> jax.Array:
-        """(z + action) → hidden_dim. Linear → LayerNorm → ELU."""
+        """(z + action) → hidden_dim. Linear → LayerNorm → SiLU."""
         return jax.nn.silu(self.pre_gru_norm(self.pre_gru_linear(x)))
 
     def _prior_net(self, h: jax.Array) -> jax.Array:
-        """h → z_logits flat (z_dim,). Linear → LayerNorm → ELU → Linear."""
+        """h → z_logits flat (z_dim,). Linear → LayerNorm → SiLU → Linear."""
         x = jax.nn.silu(self.prior_norm(self.prior_linear1(h)))
         return self.prior_linear2(x)
 
     def _posterior_net(self, h_emb: jax.Array) -> jax.Array:
-        """(h, embedding) concat → z_logits flat (z_dim,). Linear → LN → ELU → Linear."""
+        """(h, embedding) concat → z_logits flat (z_dim,). Linear → LN → SiLU → Linear."""
         x = jax.nn.silu(self.post_norm(self.post_linear1(h_emb)))
         return self.post_linear2(x)
 
@@ -480,15 +483,24 @@ class RSSM(nnx.Module):
         Returns:
             loss : scalaire
         """
-        # distrax.Categorical opère sur la dernière dim (z_classes)
+        # Categorical opère sur la dernière dim (z_classes)
         # Versions avec stop_gradient sur les logits
-        post_logits_sg = jax.lax.stop_gradient(post_logits)
-        prior_logits_sg = jax.lax.stop_gradient(prior_logits)
+        # Unimix 1% (anti-collapse DreamerV3) appliqué AUSSI dans la KL (pas
+        # seulement au sampling) : borne log p_other → évite que le prior produise
+        # des logits extrêmes → KL qui explose → gradients instables sous replay.
+        # Aligné symoon11 (get_dist() unimixé utilisé au sampling ET dans la KL).
+        def _unimix(logits, mix=0.01):
+            p = jax.nn.softmax(logits, axis=-1)
+            return (1.0 - mix) * p + mix / p.shape[-1]
+        post_probs = _unimix(post_logits)
+        prior_probs = _unimix(prior_logits)
+        post_probs_sg = jax.lax.stop_gradient(post_probs)
+        prior_probs_sg = jax.lax.stop_gradient(prior_probs)
 
-        post_dist = distrax.Categorical(logits=post_logits)
-        prior_dist = distrax.Categorical(logits=prior_logits)
-        post_dist_sg = distrax.Categorical(logits=post_logits_sg)
-        prior_dist_sg = distrax.Categorical(logits=prior_logits_sg)
+        post_dist = Categorical(probs=post_probs)
+        prior_dist = Categorical(probs=prior_probs)
+        post_dist_sg = Categorical(probs=post_probs_sg)
+        prior_dist_sg = Categorical(probs=prior_probs_sg)
 
         # KL divergence : shape (B, T, z_cat) — la dim z_classes est consommée
         kl_prior_learn = post_dist_sg.kl_divergence(prior_dist)
