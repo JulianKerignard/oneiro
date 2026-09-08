@@ -333,6 +333,8 @@ de vitesse).
 
 **Statut** : ⚠️ **PARTIELLEMENT VALIDÉE** — le ratio 256 double la sample efficiency
 dans le régime PRÉCOCE, mais ne déplace pas l'asymptote et ne débloque pas le mur.
+Le prolongement v58 (2026-09-07) ne change PAS ce verdict : il ajoute un gain réel mais
+**confondu avec le rafraîchissement du buffer** à la reprise — voir [H_319](#h_319).
 
 > Rectificatif du 2026-09-02 : la première version de ce verdict concluait « invalidée »
 > en comparant v56 à 0.80M env steps à v55 à **1.28M**. C'est une comparaison à budget
@@ -403,6 +405,57 @@ ferait *advenir* la conjonction (bois + pierre + près d'une table).
   sous le bug de convention), celle-ci est postérieure au fix — mais elle reste une
   extrapolation, pas une mesure.
 
+**Prolongement v58 (reprise du checkpoint v56 @25000 → 40000, 2026-09-07)** :
+
+| run | params | ratio | env steps | best ach | **crafter (protocole officiel)** |
+|---|---|---|---|---|---|
+| v54 | 64.9M | 128 | 1.20M | 10.56 | **10.05%** |
+| **v58** (chaîne v56+v58) | **14.4M** | **256** | **1.28M** | **10.72** | **9.18%** |
+| v55 | 14.4M | 128 | 1.28M | 8.89 | 6.58% |
+
+**Les deux métriques se contredisent, et c'est le point important.** Le 14.4M gagne sur les
+achievements par épisode (10.72 vs 10.56) mais **perd sur le crafter_score** (9.18% vs
+10.05%). Ce n'est pas une contradiction : le score est une moyenne *géométrique* sur les 22
+achievements, donc il récompense la **diversité**, pas le volume. Le 14.4M répète mieux un
+sous-ensemble un peu plus étroit ; le 64.9M en touche davantage.
+
+L'arbre du craft le montre : le 14.4M domine le milieu de chaîne (`collect_stone` 84% vs
+77%, `place_stone` 84% vs 77%, `make_wood_pickaxe` 93% vs 89%) mais reste derrière sur les
+paliers profonds (`collect_coal` 35% vs 41%, `place_furnace` 29% vs 32%).
+
+⚠️ **Le 9.18% est RECONSTRUIT.** Les compteurs n'étant pas restaurés à la reprise, il faut
+additionner les compteurs finaux de v56 (4365 eps, 0 → 0.80M) et de v58 (2029 eps,
+0.88M → 1.28M) : 6394 épisodes depuis zéro. Le trou est le warmup de 50k steps de la
+reprise, non comptabilisé. Seul le point final est reconstituable — les compteurs par éval
+ne sont pas dans les summaries, donc la **courbe** intermédiaire reste incalculable.
+
+☠️ **Piège de mesure — le 14.17% affiché par v58 est faux comme comparaison.** C'est un
+cumul sur 2029 épisodes **tous post-reprise**, donc tous issus d'une politique déjà à 8.76
+achievements. Les runs complets cumulent depuis la politique aléatoire, et leurs milliers
+d'épisodes nuls du début tirent la moyenne géométrique vers le bas. Tracé tel quel, ce
+chiffre place v58 au-dessus de DreamerV2 et contre DreamerV3 — c'est un artefact.
+`experiments/make_report.py` détecte désormais une reprise, dégrade la courbe en pointillé
+avec un avertissement, et pose le score de chaîne en ★ via `--resume-parent ENFANT=PARENT`.
+Même remarque, plus faible, pour un score calculé sur la seule dernière éval (16.65% vs
+15.26% vs 11.11%) : comparable **entre runs**, mais jamais aux baselines publiées.
+
+⚠️ **Ce gain n'est PAS attribuable au ratio.** Le saut coïncide exactement avec la reprise —
+voir [H_319](#h_319) pour la mesure. Après le saut, les pentes sont indiscernables :
+sur 0.40M env steps à partir de 0.88M, v58 gagne +1.96, v55 +1.52, v54 +1.69 (extrapolé).
+Un ratio supérieur produirait une **pente** meilleure ; on observe une **marche**.
+
+⚠️ Le `crafter_score` affiché par v58 (14.17%) est cumulé **depuis la reprise seulement**
+(compteurs non restaurés, le checkpoint v56 précédant le commit `322bf6e`). Il n'est pas
+comparable au protocole benchmark. Les 16.65% du tableau sont recalculés à protocole
+identique pour les trois runs (moyenne géométrique sur la dernière éval de 75 épisodes) :
+comparable entre eux, mais ce n'est pas le chiffre du scoreboard.
+
+**Frémissement sur le mur** : `make_stone_pickaxe` = **9 / 2029 épisodes (0.44%)** chez v58,
+contre 3/6810 (v55) et 4/6254 (v54) — et un `collect_iron` est apparu. À prendre avec
+prudence : les 2029 épisodes de v58 sont **tous post-reprise**, donc issus d'une politique
+déjà mûre, alors que les 6810 de v55 incluent tout le début du run. Le facteur ~7 va dans
+le bon sens mais 9 événements ne suffisent pas, et l'éval à 75 épisodes lit toujours 0%.
+
 <details><summary>Critère posé avant le run (archivé)</summary>
 
 **Critère de décision, à itération appariée** (= env steps appariés, `collect_per_iter` étant
@@ -420,6 +473,52 @@ identique) — références v55 : @20000 → 6.29 ach, @22500 → 6.56, @25000 �
 
 ---
 
+
+<a id="h_319"></a>
+### H_319 — Le buffer périmé freine l'apprentissage : le vider vaut un doublement de ratio
+
+**Énoncé** : passé ~0.5M env steps, une large part du buffer a été collectée par une
+politique bien plus faible que la politique courante. Ces transitions ne sont pas neutres :
+elles occupent des pas de gradient et tirent le world model vers une distribution d'états
+que l'agent ne visite plus. Vider le buffer et le remplir **on-policy** devrait produire un
+gain immédiat, à zéro paramètre et zéro coût de calcul.
+
+**Origine** : confond identifié dans v58 (2026-09-07). La reprise vide le buffer par
+construction (il n'est pas sérialisé dans le checkpoint) et le re-remplit via un warmup
+on-policy de 50 000 steps avec les poids chargés.
+
+**La mesure** : distribution des sauts d'achievements sur une fenêtre de 2500 itérations
+(0.08M env steps), sur les trois runs sans reprise.
+
+| | saut max sur une fenêtre |
+|---|---|
+| v54 (64.9M, r128) | +1.23 |
+| v55 (14.4M, r128) | +0.84 |
+| v56 (14.4M, r256) | +0.75 |
+| **v56 → v58, fenêtre de la reprise** | **+2.09** |
+
+**0 fenêtre sur 38** atteint +2.09. Le saut de la reprise est hors de la distribution de
+tout ce qui a été observé en régime normal.
+
+Argument de forme : le gain est une **marche unique**, pas une pente. Les pentes
+post-reprise sont comparables entre v58, v55 et v54 (cf. H_318). Un effet de ratio se
+manifesterait par une pente durablement supérieure.
+
+**Statut** : 🔄 **OUVERTE — confond non résolu.** Deux explications restent compatibles
+avec les données : (a) le ratio 256 décolle tardivement après 0.88M, ce qui contredirait
+l'égalité v56/v55 observée jusqu'à 0.80M ; (b) le rafraîchissement du buffer. La forme du
+signal favorise nettement (b).
+
+**Expérience discriminante** (1 variable, ~5 h TPU) : reprendre **v55** (ratio 128) depuis
+son checkpoint @25000, même warmup on-policy de 50k steps, ratio inchangé.
+- saut comparable (≥ +1.5) → c'est le **buffer**. Levier générique, applicable à tout run.
+- pas de saut → c'est le **ratio**, et H_318 devient pleinement validée.
+
+**Enjeu** : si c'est le buffer, le levier est gratuit et probablement répétable — un
+rafraîchissement périodique (ou une pondération par fraîcheur, façon prioritized replay
+sur l'âge) deviendrait un candidat sérieux, à tester après le probe.
+
+---
 
 ### H_313 — Le vrai goulot est la DURÉE DE VIE, et `rare_weight` l'écrase
 

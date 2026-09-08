@@ -1486,6 +1486,10 @@ def parse_args():
                         "cpu : buffer en RAM host, transfert du batch au sample "
                         "(défaut en production TPU, et seule option si la VRAM ne tient "
                         "pas les 12.3 GB ; -20 à -40%% ips).")
+    p.add_argument("--resume_meta", type=str, default=None,
+                   help="Chemin d'un .meta.json de remplacement (compteurs + historique) "
+                        "pour reparer une chaine de reprises dont un maillon ne les "
+                        "transportait pas. Par defaut : le .meta.json du checkpoint.")
     p.add_argument("--resume_from", type=str, default=None,
                    help="Checkpoint .npz à charger pour reprendre le training "
                         "(reprend à l'iter du .meta.json). Le buffer repart du "
@@ -1812,7 +1816,7 @@ def main():
             sys.exit(f"ERREUR : --resume_from introuvable : {_rp}")
         args.resume_from = _rp
     if args.resume_from:
-        start_iter = load_checkpoint_into_modules(args.resume_from, {
+        start_iter = load_checkpoint_into_modules(args.resume_from, meta_override=args.resume_meta, named_modules={
             "encoder": encoder, "rssm": rssm, "decoder": decoder,
             "reward_head": reward_head, "continue_head": continue_head,
             "actor": actor, "critic": critic, "slow_critic": slow_critic,
@@ -2014,9 +2018,20 @@ def main():
     train_ach_counts = {}
     _resumed_counters = {}
     if args.resume_from:
-        _mp = Path(args.resume_from).with_suffix(".meta.json")
+        # --resume_meta permet de REPARER une chaine cassee : un checkpoint produit
+        # avant que le meta ne transporte compteurs+historique (ou dont le parent
+        # n'avait pas propage les siens) laisse un trou. On fournit alors un meta
+        # recompose hors ligne, versionne dans le repo, qui prime sur celui du .npz.
+        _mp = Path(args.resume_meta) if args.resume_meta else \
+              Path(args.resume_from).with_suffix(".meta.json")
+        _meta = {}
         if _mp.exists():
-            _resumed_counters = json.loads(_mp.read_text()).get("counters", {}) or {}
+            _meta = json.loads(_mp.read_text())
+            if args.resume_meta:
+                print(f"[resume] meta surchargé depuis {_mp}")
+        elif args.resume_meta:
+            sys.exit(f"ERREUR : --resume_meta introuvable : {_mp}")
+        _resumed_counters = _meta.get("counters", {}) or {}
         if _resumed_counters:
             train_ach_counts = dict(_resumed_counters.get("train_ach_counts", {}))
             train_episode_count = int(_resumed_counters.get("train_episode_count", 0))
@@ -2025,6 +2040,39 @@ def main():
         else:
             print("[resume] /!\\ pas de compteurs dans le meta (format ancien) : "
                   "le crafter_score repart de zéro et n'est pas comparable au pré-reprise.")
+
+        # HISTORIQUE : on prefixe la courbe du parent pour que le summary de ce run
+        # couvre la chaine COMPLETE depuis l'iteration 0. Les points au-dela de
+        # start_iter sont ecartes (cas d'une reprise depuis un checkpoint qui n'est
+        # pas le dernier du parent) pour ne pas creer de discontinuite.
+        _hist = _meta.get("history") or {}
+        if _hist:
+            _keep = [j for j, i in enumerate(_hist.get("iter", [])) if i <= start_iter]
+            _keep_ev = [j for j, i in enumerate(_hist.get("eval_iter", [])) if i <= start_iter]
+            n_dense = n_eval = 0
+            for k, v in _hist.items():
+                if k not in history or not isinstance(v, list):
+                    continue
+                idx = _keep_ev if k.startswith("eval_") else _keep
+                if len(v) < (max(idx) + 1 if idx else 0):
+                    continue          # serie plus courte que 'iter' : on ne devine pas
+                history[k] = [v[j] for j in idx]
+                if k.startswith("eval_"):
+                    n_eval = len(history[k])
+                else:
+                    n_dense = len(history[k])
+            if n_dense == 0 and n_eval == 0:
+                raise SystemExit(
+                    f"ERREUR : le meta contient un historique "
+                    f"({len(_hist.get('iter', []))} points) mais AUCUN n'est <= "
+                    f"start_iter={start_iter}. Le meta et le checkpoint ne "
+                    "correspondent pas — verifier --resume_meta.")
+            print(f"[resume] historique restauré : {n_dense} points denses, "
+                  f"{n_eval} évals (jusqu'à iter {start_iter}) — la courbe couvre "
+                  "la chaîne complète.")
+        else:
+            print("[resume] /!\\ pas d'historique dans le meta : le summary ne couvrira "
+                  "que la portion post-reprise. Utiliser --resume_meta pour le réparer.")
     # DIAGNOSTIC comportemental (cumulé sur les épisodes de train) :
     #   diag_wood_hist  : distribution du max de bois atteint par épisode (0..5+).
     #     place_table coûte 2 bois, la pioche +1 → si la masse est sur 0-1, tout le
@@ -2088,9 +2136,16 @@ def main():
 
     last_metrics = {}
 
-    # Best EVAL tracking (indépendant de auto_explore, qui peut être off)
+    # Best EVAL tracking (indépendant de auto_explore, qui peut être off).
+    # Reamorce sur l'historique restaure : sinon une reprise repart d'un best a 0,
+    # et la premiere eval du nouveau run — meme mauvaise — devient le "best".
     eval_best_ach = 0.0
     eval_best_iter = 0
+    if history["eval_achievements"]:
+        eval_best_ach = max(history["eval_achievements"])
+        eval_best_iter = history["eval_iter"][
+            history["eval_achievements"].index(eval_best_ach)]
+        print(f"[resume] best-so-far réamorcé : {eval_best_ach:.2f} @ iter {eval_best_iter}")
 
     # Profiler (no-op si --profile pas activé)
     prof = Profiler(enabled=args.profile)
@@ -2719,6 +2774,21 @@ def main():
     print("=" * 60)
 
 
+def _jsonable(obj):
+    """Convertit numpy/jax en types JSON natifs, recursivement."""
+    if isinstance(obj, dict):
+        return {k: _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(v) for v in obj]
+    if hasattr(obj, "tolist"):
+        return obj.tolist()
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    return obj
+
+
 def save_checkpoint(path, encoder, rssm, decoder, reward_head, continue_head,
                     actor, critic, slow_critic, it, args, history,
                     opt_wm=None, opt_ac=None, return_ema_std=None, counters=None):
@@ -2771,6 +2841,12 @@ def save_checkpoint(path, encoder, rssm, decoder, reward_head, continue_head,
     # d'autre de la reprise.
     meta_path = path.with_suffix(".meta.json")
     meta = {"iter": int(it), "args": vars(args)}
+    # L'HISTORIQUE voyage avec le checkpoint, au meme titre que les compteurs : sans
+    # lui, le summary d'un run repris ne contient que la portion post-reprise et la
+    # courbe d'apprentissage est amputee de tout son debut (cf. v58, ou le
+    # crafter_score cumule sur la seule fin de chaine surestimait de 14.17% vs 9.18%).
+    if history is not None:
+        meta["history"] = _jsonable(history)
     if counters is not None:
         meta["counters"] = {k: (dict(v) if isinstance(v, dict) else
                                 (v.tolist() if hasattr(v, "tolist") else v))
@@ -2835,7 +2911,7 @@ def load_optimizer_state(path, named_optimizers) -> int:
     return total
 
 
-def load_checkpoint_into_modules(path, named_modules):
+def load_checkpoint_into_modules(path, named_modules, meta_override=None):
     """
     Charge un checkpoint .npz (format save_checkpoint) dans les modules.
 
@@ -2847,7 +2923,8 @@ def load_checkpoint_into_modules(path, named_modules):
         named_modules : dict {prefix: module} (mêmes prefixes que save_checkpoint)
 
     Returns:
-        start_iter (int) : l'itération du checkpoint (0 si meta absent).
+        start_iter (int) : l'itération du checkpoint. Sort en erreur si le meta
+        est absent : une reprise sans iteration connue casse historique et compteurs.
     """
     path = Path(path)
     ckpt = np.load(path, allow_pickle=False)
@@ -2867,10 +2944,21 @@ def load_checkpoint_into_modules(path, named_modules):
         print(f"[resume]   {prefix} OK{tag}")
 
     start_iter = 0
-    meta_path = path.with_suffix(".meta.json")
+    meta_path = Path(meta_override) if meta_override else path.with_suffix(".meta.json")
     if meta_path.exists():
         with open(meta_path) as f:
             start_iter = int(json.load(f).get("iter", 0))
+    if start_iter == 0:
+        # Un checkpoint qu'on recharge est par definition posterieur a l'iteration 0.
+        # Retomber a 0 en silence, c'est la classe de bug qui a coute 12 h de TPU sur
+        # v57 : le run repart, l'historique est filtre a vide, et rien ne le signale.
+        raise SystemExit(
+            f"ERREUR : impossible de determiner l'iteration de reprise.\n"
+            f"  checkpoint : {path}\n"
+            f"  meta cherche : {meta_path} ({'absent' if not meta_path.exists() else 'sans cle iter'})\n"
+            "Le .meta.json doit accompagner le .npz (meme prefixe), ou etre fourni via "
+            "--resume_meta. Sans lui, les compteurs, l'historique et le numero "
+            "d'iteration sont perdus.")
     print(f"[resume] reprise à iter {start_iter}")
     return start_iter
 

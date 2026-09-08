@@ -33,6 +33,7 @@ import tempfile
 from pathlib import Path
 
 REPO_URL = "https://github.com/JulianKerignard/oneiro.git"
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BRANCH = "feat/tpu"   # branche de travail ; surchargeable via --branch
 
 # Le CLI `kaggle` vit à côté du python courant (venv), pas forcément dans le PATH.
@@ -103,6 +104,11 @@ def build_notebook(args) -> dict:
             'find /kaggle/input -maxdepth 3 2>&1 | head -40; exit 1; fi; '
             'echo "RESUME depuis $CKPT"; ')
         train_cmd += ' --resume_from "$CKPT"'
+        # Chaine cassee : un maillon anterieur ne transportait ni compteurs ni
+        # historique dans son .meta.json. On fournit un meta recompose hors ligne et
+        # versionne dans le repo (donc present dans le clone, cwd = oneiro/).
+        if getattr(args, "resume_meta", None):
+            train_cmd += f' --resume_meta {args.resume_meta}'
 
     # JAX backend selon l'accélérateur : cuda12 pour GPU, tpu pour TPU v5e-8.
     # Sur TPU v5e-8, JAX voit les 8 cores ; le training s'auto-active en
@@ -167,6 +173,11 @@ def cmd_launch(args):
     slug = args.run_name.lower().replace("_", "-")[:50]
     work = Path(tempfile.mkdtemp(prefix="kaggle_oneiro_"))
     (work / "notebook.ipynb").write_text(json.dumps(build_notebook(args)))
+    if getattr(args, "resume_meta", None):
+        rm = REPO_ROOT / args.resume_meta
+        if not rm.exists():
+            sys.exit(f"ERREUR : --resume-meta introuvable dans le repo : {rm}\n"
+                     "Le kernel clone GitHub : ce fichier doit etre COMMITE ET PUSHE.")
     resume_slug = getattr(args, "resume_from_kernel", None)
     if resume_slug:
         resume_slug = resume_slug.lower().replace("_", "-")[:50]
@@ -233,6 +244,11 @@ def main():
                          "au bout meme en cas de warning persistant (on veut la trajectoire "
                          "complete pour l'analyse).")
     pl.add_argument("--extra-args", type=str, default="")
+    pl.add_argument("--resume-meta", type=str, default=None,
+                    help="Chemin (relatif au repo) d'un .meta.json recompose fournissant "
+                         "compteurs + historique de la chaine complete, quand le "
+                         "checkpoint repris ne les porte pas. Ex: "
+                         "experiments/data/chain_v56_v58_iter040000.meta.json")
     pl.add_argument("--resume-from-kernel", type=str, default=None,
                     help="Slug d'un kernel précédent : monte son output (kernel_sources) et "
                          "reprend son checkpoint iterXXXXXX le plus avancé via --resume_from.")
