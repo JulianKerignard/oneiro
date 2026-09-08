@@ -1693,6 +1693,27 @@ def main():
     # Dimensions prises depuis args (défauts = les constantes du fichier) : permet de
     # varier l'architecture sans commit, donc de garder la discipline « une variable
     # par run » sur les expériences de capacité.
+    # REPRISE : l'architecture est dictee par le checkpoint, pas par la ligne de
+    # commande. La retaper a la main est une source d'erreur silencieuse — un oubli
+    # construit le modele par defaut, le loader ecrase des tenseurs de shapes
+    # incompatibles et le crash n'arrive qu'au premier forward (constate sur v59 :
+    # 64.9M construit sur un checkpoint 14.4M). On la lit donc dans le .meta.json.
+    ARCH_KEYS = ("embed_dim", "h_dim", "z_categories", "z_classes",
+                 "hidden_dim", "cnn_depth", "ac_hidden_dim", "ac_num_layers")
+    if args.resume_from:
+        _amp = Path(args.resume_meta) if args.resume_meta else \
+               Path(args.resume_from).with_suffix(".meta.json")
+        _ckpt_args = json.loads(_amp.read_text()).get("args", {}) if _amp.exists() else {}
+        _over = {k: _ckpt_args[k] for k in ARCH_KEYS
+                 if k in _ckpt_args and _ckpt_args[k] != getattr(args, k)}
+        if _over:
+            print("[resume] architecture reprise du checkpoint : "
+                  + ", ".join(f"{k} {getattr(args, k)}→{v}" for k, v in _over.items()))
+            for k, v in _over.items():
+                setattr(args, k, v)
+        elif _ckpt_args:
+            print("[resume] architecture identique à celle du checkpoint.")
+
     embed_dim = args.embed_dim
     h_dim = args.h_dim
     hidden_dim = args.hidden_dim
@@ -2930,18 +2951,37 @@ def load_checkpoint_into_modules(path, named_modules, meta_override=None):
     ckpt = np.load(path, allow_pickle=False)
     print(f"[resume] {len(ckpt.files)} clés chargées depuis {path.name}")
 
+    mismatches = []
     for prefix, module in named_modules.items():
         state = nnx.state(module, nnx.Param)
         expected = flatten_state(state)
         missing = 0
-        for key in expected:
+        for key, cur in expected.items():
             full_key = f"{prefix}.{key}"
-            if full_key in ckpt.files:
-                _set_at_path(state, key.split("."), ckpt[full_key])
-            else:
+            if full_key not in ckpt.files:
                 missing += 1
+                continue
+            # VERIFIER LA SHAPE avant d'ecraser : sans ce test, un checkpoint d'une
+            # autre architecture se "charge" sans erreur (les tenseurs sont remplaces
+            # tels quels) et n'explose qu'au premier forward, loin de la cause.
+            want = getattr(cur, "shape", None) if not hasattr(cur, "value") else \
+                   getattr(cur.value, "shape", None)
+            got = ckpt[full_key].shape
+            if want is not None and tuple(want) != tuple(got):
+                mismatches.append(f"{full_key} : modele {tuple(want)} vs checkpoint {tuple(got)}")
+                continue
+            _set_at_path(state, key.split("."), ckpt[full_key])
         tag = f" ({missing} clés manquantes !)" if missing else ""
         print(f"[resume]   {prefix} OK{tag}")
+
+    if mismatches:
+        raise SystemExit(
+            "ERREUR : le checkpoint ne correspond PAS a l'architecture construite "
+            f"({len(mismatches)} tenseurs incompatibles). Les 5 premiers :\n  "
+            + "\n  ".join(mismatches[:5])
+            + "\n\nUne reprise doit utiliser l'architecture du checkpoint. Elle est "
+              "dans son .meta.json (cle args) et devrait etre appliquee "
+              "automatiquement — verifier que le meta accompagne bien le .npz.")
 
     start_iter = 0
     meta_path = Path(meta_override) if meta_override else path.with_suffix(".meta.json")
